@@ -692,7 +692,7 @@ function renderClips() {
     el.dataset.id = f.id;
     var mb = f.size ? (parseInt(f.size) / 1048576).toFixed(1) + " MB" : "";
     var thumb = f.thumbnailLink ? "<img class='thumb' src='" + f.thumbnailLink + "'>" : "<div class='thumb'></div>";
-    el.innerHTML = "<span class='drag-handle'>&#8942;</span>" + thumb +
+    el.innerHTML = "<span class='drag-handle'>::</span>" + thumb +
       "<input type='checkbox' class='clip-check' checked>" +
       "<span class='clip-name'>" + f.name + "</span>" +
       "<span class='clip-meta'>" + mb + "</span>";
@@ -742,7 +742,7 @@ function renderMusic() {
     el.dataset.id = f.id;
     var mb = f.size ? (parseInt(f.size) / 1048576).toFixed(1) + " MB" : "";
     el.innerHTML =
-      "<div class='music-icon'>\u266B</div>" +
+      "<div class='music-icon'>~</div>" +
       "<span class='music-name'>" + f.name + "</span>" +
       "<span class='clip-meta'>" + mb + "</span>";
     el.addEventListener("click", function() {
@@ -857,7 +857,7 @@ function pollLog() {
     fetch("/api/status")
       .then(function(r) { return r.json(); })
       .then(function(data) {
-        logEl.textContent = data.log.join("\n");
+        logEl.textContent = data.log.join(String.fromCharCode(10));
         logEl.scrollTop = logEl.scrollHeight;
         if (!data.running) {
           clearInterval(interval);
