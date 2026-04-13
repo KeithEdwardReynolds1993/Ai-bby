@@ -367,21 +367,7 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
         local_clips = trimmed_clips
         durations = segment_durations
 
-    # ── Ken Burns zoom pan ──
-    if ken_burns:
-        kb_clips = []
-        for i, clip in enumerate(local_clips):
-            out = INPUT / f"kb{i+1:02d}.mp4"
-            dur = durations[i] if i < len(durations) else get_video_duration(clip)
-            frames = int(dur * 25)
-            direction = i % 2  # alternate zoom in / zoom out
-            if direction == 0:
-                zoompan = f"zoompan=z='min(zoom+0.0015,1.5)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s=1080x1920:fps=25"
-            else:
-                zoompan = f"zoompan=z='if(lte(zoom,1.0),1.5,max(1.0,zoom-0.0015))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s=1080x1920:fps=25"
-            run(["ffmpeg", "-y", "-i", str(clip), "-vf", zoompan, "-an", str(out)])
-            kb_clips.append(out)
-        local_clips = kb_clips
+    # Ken Burns applied in final vf filter (fast scale/crop, not per-clip zoompan)
 
     # ── Concat with xfade transitions ──
     xfade_name = XFADE_TRANSITIONS.get(transition)
@@ -451,9 +437,12 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
         f"alpha='{alpha_expr}'"
     )
 
+    kb_filter = ",scale=iw*1.05:ih*1.05,crop=iw/1.05:ih/1.05" if ken_burns else ""
+
     vf = (
         f"scale=1080:1920:force_original_aspect_ratio=decrease,"
         f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
+        f"{kb_filter}"
         f"{vibe_filter},"
         f"{drawtext}"
     )
