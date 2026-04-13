@@ -547,7 +547,7 @@ HTML = """
 </div>
 
 <script>
-  const MAX_CHARS = {{ max_chars }};
+  const MAX_CHARS = parseInt("{{ max_chars }}");
   let allFiles = [];
   let dragSrc = null;
 
