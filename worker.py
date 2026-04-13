@@ -314,7 +314,7 @@ def build_video(batch_key):
         f"fontcolor=white:"
         f"fontsize=54:"
         f"x=(w-text_w)/2:"
-        f"y=(h*0.82)-(text_h/2):"
+        f"y=(h-text_h)/2:"
         f"box=1:"
         f"boxcolor=black@0.72:"
         f"boxborderw={pad}"
