@@ -1,10 +1,4 @@
-python3 - <<'PY'
-from pathlib import Path
-
-path = Path("/Volumes/Public/Keith/2026/Ai-bby_V1/worker.py")
-path.parent.mkdir(parents=True, exist_ok=True)
-
-path.write_text(r'''import os
+import os
 import shlex
 import shutil
 import subprocess
@@ -44,13 +38,13 @@ def log(*parts):
 
 
 def run_cmd(cmd):
-    log("\\n>>>", " ".join(shlex.quote(str(x)) for x in cmd))
+    log("\n>>>", " ".join(shlex.quote(str(x)) for x in cmd))
     result = subprocess.run(cmd, capture_output=True, text=True)
     log(">>> return code:", result.returncode)
     if result.stdout.strip():
-        log(">>> stdout:\\n" + result.stdout[-4000:])
+        log(">>> stdout:\n" + result.stdout[-4000:])
     if result.stderr.strip():
-        log(">>> stderr:\\n" + result.stderr[-4000:])
+        log(">>> stderr:\n" + result.stderr[-4000:])
     if result.returncode != 0:
         raise RuntimeError(f"Command failed: {' '.join(map(str, cmd))}")
     return result
@@ -64,9 +58,9 @@ def validate_inputs():
     missing = [str(p) for p in INPUTS if not p.exists()]
     if missing:
         raise FileNotFoundError(
-            "Missing input clips. Expected these files:\\n"
-            + "\\n".join(missing)
-            + "\\n\\nPut 3 clips in /app/input as clip1.mp4, clip2.mp4, clip3.mp4"
+            "Missing input clips. Expected these files:\n"
+            + "\n".join(missing)
+            + "\n\nPut 3 clips in /app/input as clip1.mp4, clip2.mp4, clip3.mp4"
         )
 
 
@@ -96,7 +90,7 @@ def normalize_clip(src: Path, dst: Path):
 
 def write_concat_list():
     lines = [f"file '{p}'" for p in NORMALIZED]
-    CONCAT_LIST.write_text("\\n".join(lines) + "\\n", encoding="utf-8")
+    CONCAT_LIST.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def concat_clips():
@@ -118,7 +112,7 @@ def concat_clips():
 
 def escape_drawtext(text: str) -> str:
     return (
-        text.replace("\\\\", r"\\\\")
+        text.replace("\\", r"\\")
             .replace(":", r"\:")
             .replace("'", r"\'")
             .replace("%", r"\%")
@@ -187,7 +181,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-''', encoding="utf-8")
-
-print(f"Wrote {path}")
-PY
