@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload, MediaIoBaseUpload
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 from google.oauth2 import service_account
 
 
@@ -40,10 +40,7 @@ ARCHIVE_FOLDER = os.getenv("GOOGLE_DRIVE_ARCHIVE_FOLDER_ID")
 
 CAPTION = os.getenv("CAPTION_TEXT", "Made with AI")
 
-# Optional: put a file with this name in your OUTPUT folder to persist processed state
 STATE_FILENAME = os.getenv("STATE_FILENAME", "processed_batches.json")
-
-# Optional: minimum age in seconds before a file is considered stable enough to process
 MIN_FILE_AGE_SECONDS = int(os.getenv("MIN_FILE_AGE_SECONDS", "30"))
 
 
@@ -66,6 +63,7 @@ def drive():
 def utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
 
+
 def reset_tmp():
     if INPUT.exists():
         shutil.rmtree(INPUT)
@@ -78,9 +76,11 @@ def reset_tmp():
     if MERGED.exists():
         MERGED.unlink()
 
+
 def run(cmd):
     print(">>>", " ".join(cmd))
     subprocess.run(cmd, check=True)
+
 
 def ffmpeg_escape(text: str) -> str:
     return (
@@ -89,6 +89,8 @@ def ffmpeg_escape(text: str) -> str:
             .replace("'", r"\'")
             .replace("%", r"\%")
             .replace(",", r"\,")
+            .replace("[", r"\[")
+            .replace("]", r"\]")
     )
 
 
@@ -309,25 +311,44 @@ def build_video(batch_key):
     final_path = OUTPUT / output_name_for_batch(batch_key)
     safe_caption = ffmpeg_escape(CAPTION)
 
+    # Final video canvas
+    W = 1080
+    H = 1920
+
+    # Caption box geometry
+    box_w = int(W * 0.84)   # 907
+    box_h = 140
+    box_x = (W - box_w) // 2
+    box_y = int(H * 0.78)
+
+    # Text placement
+    font_size = 54
+    text_y = box_y + ((box_h - font_size) // 2)
+
     drawbox = (
-        "drawbox="
-        "x=(w*0.08):"
-        "y=(h*0.78):"
-        "w=(w*0.84):"
-        "h=140:"
-        "color=black@0.72:"
-        "t=fill"
+        f"drawbox="
+        f"x={box_x}:"
+        f"y={box_y}:"
+        f"w={box_w}:"
+        f"h={box_h}:"
+        f"color=black@0.72:"
+        f"t=fill"
     )
 
     drawtext = (
         f"drawtext=text='{safe_caption}':"
-        "fontcolor=white:"
-        "fontsize=54:"
-        "x=(w-text_w)/2:"
-        "y=(h*0.78)+((140-text_h)/2)"
+        f"fontcolor=white:"
+        f"fontsize={font_size}:"
+        f"x=(w-text_w)/2:"
+        f"y={text_y}"
     )
 
-    vf = f"scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,{drawbox},{drawtext}"
+    vf = (
+        f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+        f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:black,"
+        f"{drawbox},"
+        f"{drawtext}"
+    )
 
     run([
         "ffmpeg", "-y",
@@ -427,7 +448,7 @@ def main():
             "output_file_id": existing_output["id"],
             "output_name": existing_output["name"]
         }
-        state_file_id = save_state(state, state_file_id)
+        save_state(state, state_file_id)
         return
 
     if batch_key in processing:
@@ -456,7 +477,7 @@ def main():
 
     finally:
         processing.pop(batch_key, None)
-        state_file_id = save_state(state, state_file_id)
+        save_state(state, state_file_id)
 
     print("DONE")
 
