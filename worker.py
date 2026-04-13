@@ -160,7 +160,7 @@ def run_pipeline(selected_files, caption):
         log("Starting pipeline...")
         final_path = build_video(selected_files, caption)
         upload_output(final_path)
-        archive_inputs(selected_files)
+        # archive_inputs(selected_files)  # disabled - manual runs only
         log("Done! Video is in your output folder.")
         pipeline_status["done"] = True
     except Exception as e:
