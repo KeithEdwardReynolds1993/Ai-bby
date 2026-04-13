@@ -1,7 +1,6 @@
 import os
 import io
 import json
-import time
 import hashlib
 import shutil
 import subprocess
@@ -20,10 +19,6 @@ from google.oauth2 import service_account
 TMP = Path("/tmp/ai_bby")
 INPUT = TMP / "input"
 OUTPUT = TMP / "output"
-
-INPUT.mkdir(parents=True, exist_ok=True)
-OUTPUT.mkdir(parents=True, exist_ok=True)
-
 MERGED = TMP / "merged.mp4"
 STATE_LOCAL = TMP / "processed_batches.json"
 
@@ -39,9 +34,9 @@ OUTPUT_FOLDER = os.getenv("GOOGLE_DRIVE_OUTPUT_FOLDER_ID")
 ARCHIVE_FOLDER = os.getenv("GOOGLE_DRIVE_ARCHIVE_FOLDER_ID")
 
 CAPTION = os.getenv("CAPTION_TEXT", "Made with AI")
-
 STATE_FILENAME = os.getenv("STATE_FILENAME", "processed_batches.json")
 MIN_FILE_AGE_SECONDS = int(os.getenv("MIN_FILE_AGE_SECONDS", "30"))
+MAX_CAPTION_CHARS = int(os.getenv("MAX_CAPTION_CHARS", "60"))
 
 
 # =========================
@@ -63,34 +58,33 @@ def drive():
 def utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
 
-
-def reset_tmp():
-    if INPUT.exists():
-        shutil.rmtree(INPUT)
-    if OUTPUT.exists():
-        shutil.rmtree(OUTPUT)
-
+def ensure_dirs():
+    """Create tmp dirs if they don't exist — never wipes them."""
     INPUT.mkdir(parents=True, exist_ok=True)
     OUTPUT.mkdir(parents=True, exist_ok=True)
 
+def clean_run_artifacts():
+    """Only clears per-run files (merged + output), not downloaded inputs."""
     if MERGED.exists():
         MERGED.unlink()
-
+    for f in OUTPUT.glob("*.mp4"):
+        f.unlink()
 
 def run(cmd):
-    print(">>>", " ".join(cmd))
+    print(">>>", " ".join(str(c) for c in cmd))
     subprocess.run(cmd, check=True)
-
 
 def ffmpeg_escape(text: str) -> str:
     return (
         text.replace("\\", r"\\\\")
+            .replace("'", r"'\''")
             .replace(":", r"\:")
-            .replace("'", r"\'")
             .replace("%", r"\%")
             .replace(",", r"\,")
             .replace("[", r"\[")
             .replace("]", r"\]")
+            .replace("\n", " ")
+            .replace("\r", "")
     )
 
 
@@ -120,7 +114,6 @@ def file_is_old_enough(file_obj):
     modified = file_obj.get("modifiedTime")
     if not modified:
         return True
-
     dt = datetime.fromisoformat(modified.replace("Z", "+00:00"))
     age = (datetime.now(timezone.utc) - dt).total_seconds()
     return age >= MIN_FILE_AGE_SECONDS
@@ -145,7 +138,6 @@ def find_state_file(service):
         supportsAllDrives=True,
         corpora="allDrives"
     ).execute()
-
     files = results.get("files", [])
     return files[0] if files else None
 
@@ -155,7 +147,7 @@ def load_state():
     state_file = find_state_file(service)
 
     if not state_file:
-        print("No remote state file found. Starting fresh state.")
+        print("No remote state file found. Starting fresh.")
         return {"processed_batches": {}, "processing_batches": {}}, None
 
     request = service.files().get_media(fileId=state_file["id"])
@@ -173,7 +165,6 @@ def load_state():
         return {"processed_batches": {}, "processing_batches": {}}, state_file["id"]
 
     state = json.loads(raw)
-
     state.setdefault("processed_batches", {})
     state.setdefault("processing_batches", {})
 
@@ -183,9 +174,7 @@ def load_state():
 
 def save_state(state, state_file_id=None):
     service = drive()
-
     STATE_LOCAL.write_text(json.dumps(state, indent=2), encoding="utf-8")
-
     media = MediaFileUpload(str(STATE_LOCAL), mimetype="application/json")
 
     if state_file_id:
@@ -202,14 +191,12 @@ def save_state(state, state_file_id=None):
         "parents": [OUTPUT_FOLDER],
         "mimeType": "application/json"
     }
-
     created = service.files().create(
         body=metadata,
         media_body=media,
         fields="id",
         supportsAllDrives=True
     ).execute()
-
     print("Created remote state file")
     return created["id"]
 
@@ -220,12 +207,10 @@ def save_state(state, state_file_id=None):
 
 def generate_batch_key(files):
     files_sorted = sorted(files, key=lambda f: (f["name"], f["id"]))
-
     key_string = "|".join(
         f"{f['id']}:{f.get('md5Checksum', 'no_md5')}"
         for f in files_sorted
     )
-
     return hashlib.sha256(key_string.encode("utf-8")).hexdigest()
 
 
@@ -263,14 +248,18 @@ def output_exists(batch_key):
 def download_inputs(files):
     service = drive()
     local_clips = []
-
     files_sorted = sorted(files, key=lambda f: (f["name"], f["id"]))
 
     for i, f in enumerate(files_sorted):
-        file_id = f["id"]
         target = INPUT / f"clip{i+1}.mp4"
 
-        request = service.files().get_media(fileId=file_id)
+        # Skip re-downloading if already present and same checksum
+        if target.exists():
+            print(f"Already have {target.name}, skipping download")
+            local_clips.append(target)
+            continue
+
+        request = service.files().get_media(fileId=f["id"])
         with open(target, "wb") as fh:
             downloader = MediaIoBaseDownload(fh, request)
             done = False
@@ -293,6 +282,12 @@ def build_video(batch_key):
     if not clips:
         raise Exception("No downloaded clips found")
 
+    if len(CAPTION) > MAX_CAPTION_CHARS:
+        raise ValueError(
+            f"Caption too long ({len(CAPTION)} chars). "
+            f"Keep it under {MAX_CAPTION_CHARS} or set MAX_CAPTION_CHARS env var."
+        )
+
     list_file = TMP / "list.txt"
     list_file.write_text(
         "\n".join([f"file '{c}'" for c in clips]),
@@ -311,42 +306,23 @@ def build_video(batch_key):
     final_path = OUTPUT / output_name_for_batch(batch_key)
     safe_caption = ffmpeg_escape(CAPTION)
 
-    # Final video canvas
-    W = 1080
-    H = 1920
-
-    # Caption box geometry
-    box_w = int(W * 0.84)   # 907
-    box_h = 140
-    box_x = (W - box_w) // 2
-    box_y = int(H * 0.78)
-
-    # Text placement
-    font_size = 54
-    text_y = box_y + ((box_h - font_size) // 2)
-
-    drawbox = (
-        f"drawbox="
-        f"x={box_x}:"
-        f"y={box_y}:"
-        f"w={box_w}:"
-        f"h={box_h}:"
-        f"color=black@0.72:"
-        f"t=fill"
-    )
+    pad = 40  # padding around text inside box
 
     drawtext = (
         f"drawtext=text='{safe_caption}':"
+        f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:"
         f"fontcolor=white:"
-        f"fontsize={font_size}:"
+        f"fontsize=54:"
         f"x=(w-text_w)/2:"
-        f"y={text_y}"
+        f"y=(h*0.82)-(text_h/2):"
+        f"box=1:"
+        f"boxcolor=black@0.72:"
+        f"boxborderw={pad}"
     )
 
     vf = (
-        f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
-        f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:black,"
-        f"{drawbox},"
+        f"scale=1080:1920:force_original_aspect_ratio=decrease,"
+        f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,"
         f"{drawtext}"
     )
 
@@ -357,8 +333,7 @@ def build_video(batch_key):
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-crf", "20",
-        "-c:a", "aac",
-        "-b:a", "192k",
+        "-an",
         str(final_path)
     ])
 
@@ -405,7 +380,6 @@ def archive_inputs(files):
             supportsAllDrives=True,
             fields="id, parents"
         ).execute()
-
         print("Archived:", f["name"])
 
     print("Archived all rendered inputs")
@@ -417,7 +391,8 @@ def archive_inputs(files):
 
 def main():
     print("AI VIDEO PIPELINE START")
-    reset_tmp()
+    ensure_dirs()          # create dirs if missing, never wipes
+    clean_run_artifacts()  # only clears merged + output mp4s from last run
 
     files = list_incoming_files()
     if not files:
@@ -432,7 +407,6 @@ def main():
     print("BATCH KEY:", batch_key)
 
     state, state_file_id = load_state()
-
     processed = state["processed_batches"]
     processing = state["processing_batches"]
 
@@ -448,11 +422,11 @@ def main():
             "output_file_id": existing_output["id"],
             "output_name": existing_output["name"]
         }
-        save_state(state, state_file_id)
+        state_file_id = save_state(state, state_file_id)
         return
 
     if batch_key in processing:
-        print("Batch is already marked as processing. Skipping to avoid duplicate render.")
+        print("Batch already in progress. Skipping to avoid duplicate render.")
         return
 
     processing[batch_key] = {
@@ -463,7 +437,7 @@ def main():
     state_file_id = save_state(state, state_file_id)
 
     try:
-        download_inputs(files)
+        download_inputs(files)       # skips files already on disk
         final_path = build_video(batch_key)
         uploaded = upload_output(final_path, batch_key)
         archive_inputs(files)
@@ -477,7 +451,7 @@ def main():
 
     finally:
         processing.pop(batch_key, None)
-        save_state(state, state_file_id)
+        state_file_id = save_state(state, state_file_id)
 
     print("DONE")
 
