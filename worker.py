@@ -173,6 +173,7 @@ def analyze_music(music_path):
 
     # BPM + beat frames
     tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
+    tempo = float(np.asarray(tempo).flat[0])
     beat_times = librosa.frames_to_time(beat_frames, sr=sr)
 
     # Downbeats (every 4 beats)
@@ -189,10 +190,10 @@ def analyze_music(music_path):
 
     duration = float(len(y) / sr)
 
-    log(f"BPM: {float(tempo):.1f} | Downbeats: {len(downbeat_times)} | Duration: {duration:.1f}s")
+    log(f"BPM: {tempo:.1f} | Downbeats: {len(downbeat_times)} | Duration: {duration:.1f}s")
 
     return {
-        "bpm": float(tempo),
+        "bpm": tempo,
         "beat_times": beat_times.tolist(),
         "downbeat_times": downbeat_times,
         "duration": duration,
