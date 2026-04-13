@@ -1,6 +1,5 @@
 import os
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -10,7 +9,7 @@ from google.oauth2 import service_account
 
 
 # =========================
-# PATHS (TEMP ONLY - RENDER SAFE)
+# PATHS
 # =========================
 
 TMP = Path("/tmp/ai_bby")
@@ -40,7 +39,7 @@ CAPTION = os.getenv("CAPTION_TEXT", "Made with AI")
 
 
 # =========================
-# GOOGLE DRIVE CLIENT
+# DRIVE CLIENT
 # =========================
 
 def drive():
@@ -52,7 +51,7 @@ def drive():
 
 
 # =========================
-# INPUT DOWNLOAD
+# DOWNLOAD INPUTS
 # =========================
 
 def download_inputs():
@@ -60,7 +59,10 @@ def download_inputs():
 
     results = service.files().list(
         q=f"'{INCOMING_FOLDER}' in parents and trashed=false",
-        fields="files(id, name)"
+        fields="files(id, name)",
+        includeItemsFromAllDrives=True,
+        supportsAllDrives=True,
+        corpora="allDrives"
     ).execute()
 
     files = results.get("files", [])
@@ -131,7 +133,7 @@ def build_video():
 
 
 # =========================
-# UPLOAD OUTPUT (FIXED)
+# UPLOAD OUTPUT
 # =========================
 
 def upload_output():
@@ -148,7 +150,7 @@ def upload_output():
         body=file_metadata,
         media_body=media,
         fields="id",
-        supportsAllDrives=True   # 🔥 CRITICAL FIX
+        supportsAllDrives=True
     ).execute()
 
     print("Uploaded:", uploaded.get("id"))
@@ -163,21 +165,25 @@ def archive_inputs():
 
     files = service.files().list(
         q=f"'{INCOMING_FOLDER}' in parents and trashed=false",
-        fields="files(id, name)"
+        fields="files(id, name)",
+        includeItemsFromAllDrives=True,
+        supportsAllDrives=True,
+        corpora="allDrives"
     ).execute().get("files", [])
 
     for f in files:
         service.files().update(
             fileId=f["id"],
             addParents=ARCHIVE_FOLDER,
-            removeParents=INCOMING_FOLDER
+            removeParents=INCOMING_FOLDER,
+            supportsAllDrives=True
         ).execute()
 
     print("Archived inputs")
 
 
 # =========================
-# MAIN PIPELINE
+# MAIN
 # =========================
 
 def main():
