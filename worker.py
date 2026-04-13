@@ -10,7 +10,7 @@ from google.oauth2 import service_account
 
 
 # =========================
-# PATHS (TEMP ONLY)
+# PATHS (TEMP ONLY - RENDER SAFE)
 # =========================
 
 TMP = Path("/tmp/ai_bby")
@@ -40,7 +40,7 @@ CAPTION = os.getenv("CAPTION_TEXT", "Made with AI")
 
 
 # =========================
-# GOOGLE CLIENT
+# GOOGLE DRIVE CLIENT
 # =========================
 
 def drive():
@@ -52,7 +52,7 @@ def drive():
 
 
 # =========================
-# DRIVE DOWNLOAD INPUTS
+# INPUT DOWNLOAD
 # =========================
 
 def download_inputs():
@@ -89,7 +89,7 @@ def download_inputs():
 
 
 # =========================
-# FFMEG PIPELINE
+# FFmpeg PIPELINE
 # =========================
 
 def run(cmd):
@@ -131,7 +131,7 @@ def build_video():
 
 
 # =========================
-# UPLOAD OUTPUT
+# UPLOAD OUTPUT (FIXED)
 # =========================
 
 def upload_output():
@@ -147,7 +147,8 @@ def upload_output():
     uploaded = service.files().create(
         body=file_metadata,
         media_body=media,
-        fields="id"
+        fields="id",
+        supportsAllDrives=True   # 🔥 CRITICAL FIX
     ).execute()
 
     print("Uploaded:", uploaded.get("id"))
@@ -176,7 +177,7 @@ def archive_inputs():
 
 
 # =========================
-# MAIN
+# MAIN PIPELINE
 # =========================
 
 def main():
