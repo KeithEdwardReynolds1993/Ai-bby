@@ -51,19 +51,35 @@ def drive():
 
 
 # =========================
-# DOWNLOAD INPUTS
+# DEBUG HELPERS
+# =========================
+
+def debug_state():
+    print("=== DRIVE DEBUG ===")
+    print("INCOMING_FOLDER:", INCOMING_FOLDER)
+    print("OUTPUT_FOLDER:", OUTPUT_FOLDER)
+    print("ARCHIVE_FOLDER:", ARCHIVE_FOLDER)
+    print("===================")
+
+
+# =========================
+# INPUT DOWNLOAD
 # =========================
 
 def download_inputs():
     service = drive()
 
+    debug_state()
+
     results = service.files().list(
         q=f"'{INCOMING_FOLDER}' in parents and trashed=false",
-        fields="files(id, name)",
+        fields="files(id, name, parents)",
         includeItemsFromAllDrives=True,
         supportsAllDrives=True,
         corpora="allDrives"
     ).execute()
+
+    print("RAW DRIVE RESPONSE:", json.dumps(results, indent=2))
 
     files = results.get("files", [])
 
@@ -106,9 +122,7 @@ def build_video():
         raise Exception("No downloaded clips found")
 
     list_file = TMP / "list.txt"
-    list_file.write_text(
-        "\n".join([f"file '{c}'" for c in clips])
-    )
+    list_file.write_text("\n".join([f"file '{c}'" for c in clips]))
 
     run([
         "ffmpeg", "-y",
@@ -163,13 +177,15 @@ def upload_output():
 def archive_inputs():
     service = drive()
 
-    files = service.files().list(
+    results = service.files().list(
         q=f"'{INCOMING_FOLDER}' in parents and trashed=false",
         fields="files(id, name)",
         includeItemsFromAllDrives=True,
         supportsAllDrives=True,
         corpora="allDrives"
-    ).execute().get("files", [])
+    ).execute()
+
+    files = results.get("files", [])
 
     for f in files:
         service.files().update(
