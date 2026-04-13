@@ -296,7 +296,7 @@ HTML = (
     '  var logEl=document.getElementById("log");'
     '  var interval=setInterval(function(){'
     '    fetch("/api/status").then(function(r){return r.json();}).then(function(data){'
-    '      logEl.textContent=data.log.join("\\n");'
+    '      logEl.textContent=data.log.join(String.fromCharCode(10));'
     '      logEl.scrollTop=logEl.scrollHeight;'
     '      if(!data.running){'
     '        clearInterval(interval);'
