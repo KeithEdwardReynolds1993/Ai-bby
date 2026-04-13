@@ -6,10 +6,11 @@ from pathlib import Path
 
 APP_DIR = Path("/app")
 TMP_DIR = Path("/tmp/ai_bby")
-INPUT_DIR = APP_DIR / "input"
-OUTPUT_DIR = APP_DIR / "output"
+INPUT_DIR = TMP_DIR / "input"
+OUTPUT_DIR = TMP_DIR / "output"
 
 TMP_DIR.mkdir(parents=True, exist_ok=True)
+INPUT_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 CAPTION_TEXT = os.getenv("CAPTION_TEXT", "Fun times in AI village")
@@ -60,7 +61,7 @@ def validate_inputs():
         raise FileNotFoundError(
             "Missing input clips. Expected these files:\n"
             + "\n".join(missing)
-            + "\n\nPut 3 clips in /app/input as clip1.mp4, clip2.mp4, clip3.mp4"
+            + "\n\nUpload or copy 3 clips into /tmp/ai_bby/input as clip1.mp4, clip2.mp4, clip3.mp4"
         )
 
 
@@ -155,6 +156,8 @@ def publish_output():
 
 def main():
     log("Ai-bby V1 starting...")
+    log("App dir:", APP_DIR)
+    log("Tmp dir:", TMP_DIR)
     log("Input dir:", INPUT_DIR)
     log("Output dir:", OUTPUT_DIR)
     log("Caption:", CAPTION_TEXT)
