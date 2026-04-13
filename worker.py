@@ -742,7 +742,7 @@ function renderMusic() {
     el.dataset.id = f.id;
     var mb = f.size ? (parseInt(f.size) / 1048576).toFixed(1) + " MB" : "";
     el.innerHTML =
-      "<div class='music-icon'>&#9835;</div>" +
+      "<div class='music-icon'>\u266B</div>" +
       "<span class='music-name'>" + f.name + "</span>" +
       "<span class='clip-meta'>" + mb + "</span>";
     el.addEventListener("click", function() {
