@@ -73,7 +73,7 @@ def list_incoming_files():
     service = drive()
     results = service.files().list(
         q=f"'{INCOMING_FOLDER}' in parents and trashed=false",
-        fields="files(id, name, modifiedTime, mimeType, size)",
+        fields="files(id, name, modifiedTime, mimeType, size, thumbnailLink, videoMediaMetadata)",
         includeItemsFromAllDrives=True,
         supportsAllDrives=True,
         corpora="allDrives"
@@ -195,7 +195,9 @@ HTML = (
     '.clip-item.unselected .clip-name{color:var(--muted)}'
     '.clip-check{width:20px;height:20px;accent-color:var(--accent);cursor:pointer;flex-shrink:0}'
     '.drag-handle{color:var(--muted);font-size:1rem;flex-shrink:0}'
+    '.thumb{width:48px;height:48px;object-fit:cover;border-radius:6px;flex-shrink:0;background:var(--border)}'
     '.clip-name{flex:1;font-size:.9rem;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'
+    '.thumb{width:56px;height:56px;object-fit:cover;border-radius:6px;flex-shrink:0;background:#1c1c27;}'
     '.clip-meta{font-family:\'DM Mono\',monospace;font-size:.68rem;color:var(--muted);flex-shrink:0}'
     '.caption-wrap{position:relative}'
     '#caption{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 20px;font-family:\'Syne\',sans-serif;font-size:1.1rem;font-weight:700;color:var(--text);outline:none;transition:border-color .15s}'
@@ -246,7 +248,9 @@ HTML = (
     '    var el=document.createElement("div");'
     '    el.className="clip-item";el.draggable=true;el.dataset.id=f.id;'
     '    var mb=f.size?(parseInt(f.size)/1048576).toFixed(1)+" MB":"";'
+    '    var thumb=f.thumbnailLink?"<img class=\'thumb\' src=\'"+(f.thumbnailLink)+"\'>":"<div class=\'thumb\'></div>";'
     '    el.innerHTML=\'<span class="drag-handle">&#8942;</span>\''
+    '      +thumb'
     '      +\'<input type="checkbox" class="clip-check" checked>\''
     '      +\'<span class="clip-name">\'+f.name+\'</span>\''
     '      +\'<span class="clip-meta">\'+mb+\'</span>\';'
@@ -355,4 +359,4 @@ def api_status():
 
 if __name__ == "__main__":
     ensure_dirs()
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=False)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT") or 5000), debug=False)
