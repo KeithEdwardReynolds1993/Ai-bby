@@ -4,6 +4,7 @@ import json
 import hashlib
 import subprocess
 import threading
+import traceback
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -11,8 +12,7 @@ from flask import Flask, request, jsonify
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 from google.oauth2 import service_account
-import urllib.request
-import urllib.error
+import requests
 
 app = Flask(__name__)
 
@@ -26,7 +26,7 @@ INCOMING_FOLDER = os.getenv("GOOGLE_DRIVE_INCOMING_FOLDER_ID")
 OUTPUT_FOLDER = os.getenv("GOOGLE_DRIVE_OUTPUT_FOLDER_ID")
 ARCHIVE_FOLDER = os.getenv("GOOGLE_DRIVE_ARCHIVE_FOLDER_ID")
 MAX_CAPTION_CHARS = int(os.getenv("MAX_CAPTION_CHARS") or "60")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # <-- SET THIS IN RENDER ENV VARS
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 pipeline_status = {"running": False, "log": [], "done": False, "error": None}
 
@@ -103,6 +103,8 @@ def upload_output(final_path):
     return uploaded
 
 def ask_openai(prompt, clip_names):
+    if not OPENAI_API_KEY:
+        raise ValueError("OPENAI_API_KEY is not set in environment variables")
     system = (
         "You are a video editing AI. Given a user prompt, return ONLY a JSON object with these fields:\n"
         "- caption: string (title to overlay on the video, max 60 chars)\n"
@@ -112,26 +114,32 @@ def ask_openai(prompt, clip_names):
         "Return only valid JSON, no markdown, no extra text."
     )
     user = f"Clips: {', '.join(clip_names)}\nPrompt: {prompt}"
-    body = json.dumps({
-        "model": "gpt-4o",
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user}
-        ],
-        "temperature": 0.7
-    }).encode("utf-8")
-    req = urllib.request.Request(
+    resp = requests.post(
         "https://api.openai.com/v1/chat/completions",
-        data=body,
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {OPENAI_API_KEY}"
-        }
+        },
+        json={
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user}
+            ],
+            "temperature": 0.7
+        },
+        timeout=30
     )
-    with urllib.request.urlopen(req) as resp:
-        result = json.loads(resp.read().decode("utf-8"))
+    if not resp.ok:
+        raise ValueError(f"OpenAI API error {resp.status_code}: {resp.text}")
+    result = resp.json()
     content = result["choices"][0]["message"]["content"].strip()
-    return json.loads(content)
+    # Strip markdown code fences if present
+    if content.startswith("```"):
+        content = content.split("```")[1]
+        if content.startswith("json"):
+            content = content[4:]
+    return json.loads(content.strip())
 
 def get_vibe_filters(vibe):
     filters = {
@@ -155,15 +163,12 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal"):
         download_file(service, f, target)
         local_clips.append(target)
 
-    # If speed != 1.0, re-encode each clip with setpts
     if abs(speed - 1.0) > 0.01:
         sped_clips = []
         for i, clip in enumerate(local_clips):
             out = INPUT / f"sped{i+1:02d}.mp4"
             pts = round(1.0 / speed, 4)
-            run(["ffmpeg", "-y", "-i", str(clip),
-                 "-vf", f"setpts={pts}*PTS",
-                 "-an", str(out)])
+            run(["ffmpeg", "-y", "-i", str(clip), "-vf", f"setpts={pts}*PTS", "-an", str(out)])
             sped_clips.append(out)
         local_clips = sped_clips
 
@@ -509,6 +514,7 @@ def api_ai_plan():
         plan = ask_openai(prompt, clip_names)
         return jsonify(plan)
     except Exception as e:
+        print(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/run", methods=["POST"])
