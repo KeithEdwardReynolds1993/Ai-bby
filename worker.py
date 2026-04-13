@@ -522,7 +522,7 @@ def run_pipeline(selected_files, caption, speed=1.0, vibe="normal",
 
 # ─── HTML UI ──────────────────────────────────────────────────────────────────
 
-HTML = b"""<!DOCTYPE html>
+HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -895,7 +895,7 @@ loadMusic();
 
 @app.route("/")
 def index():
-    return app.response_class(HTML, mimetype="text/html")
+    return app.response_class(HTML.encode("utf-8"), mimetype="text/html")
 
 @app.route("/api/clips")
 def api_clips():
