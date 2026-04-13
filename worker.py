@@ -3,12 +3,14 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
-
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 import io
 
+# =========================
+# PATHS (Render safe)
+# =========================
 TMP_DIR = Path("/tmp/ai_bby")
 INPUT_DIR = TMP_DIR / "input"
 OUTPUT_DIR = TMP_DIR / "output"
@@ -17,7 +19,10 @@ TMP_DIR.mkdir(parents=True, exist_ok=True)
 INPUT_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-CAPTION_TEXT = os.getenv("CAPTION_TEXT", "AI video")
+# =========================
+# ENV VARS
+# =========================
+CAPTION_TEXT = os.getenv("CAPTION_TEXT", "AI Video")
 
 INCOMING_FOLDER = os.getenv("GOOGLE_DRIVE_INCOMING_FOLDER_ID")
 OUTPUT_FOLDER = os.getenv("GOOGLE_DRIVE_OUTPUT_FOLDER_ID")
@@ -34,11 +39,15 @@ creds = service_account.Credentials.from_service_account_info(
 
 drive = build("drive", "v3", credentials=creds)
 
-
+# =========================
+# LOGGING
+# =========================
 def log(*args):
     print(*args, flush=True)
 
-
+# =========================
+# SHELL RUNNER
+# =========================
 def run(cmd):
     log(">>>", " ".join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -50,74 +59,101 @@ def run(cmd):
         raise RuntimeError("Command failed")
     return result
 
-
-def list_clips():
+# =========================
+# GET CLIPS FROM DRIVE
+# =========================
+def get_clips():
     query = f"'{INCOMING_FOLDER}' in parents and mimeType contains 'video/'"
-    results = drive.files().list(q=query, pageSize=3, fields="files(id, name)").execute()
-    return results.get("files", [])
+    res = drive.files().list(
+        q=query,
+        fields="files(id, name)",
+        pageSize=3
+    ).execute()
 
+    return res.get("files", [])
 
-def download_file(file_id, name, dest):
+# =========================
+# DOWNLOAD FILE
+# =========================
+def download(file_id, path):
     request = drive.files().get_media(fileId=file_id)
-    fh = io.FileIO(dest, "wb")
+    fh = io.FileIO(path, "wb")
     downloader = MediaIoBaseDownload(fh, request)
 
     done = False
     while not done:
-        status, done = downloader.next_chunk()
+        _, done = downloader.next_chunk()
 
-
-def move_file(file_id, new_folder):
+# =========================
+# MOVE FILE
+# =========================
+def move(file_id, folder_id):
     file = drive.files().get(fileId=file_id, fields="parents").execute()
-    previous_parents = ",".join(file.get("parents"))
+    prev = ",".join(file.get("parents"))
+
     drive.files().update(
         fileId=file_id,
-        addParents=new_folder,
-        removeParents=previous_parents,
-        fields="id, parents",
+        addParents=folder_id,
+        removeParents=prev,
+        fields="id, parents"
     ).execute()
 
+# =========================
+# UPLOAD OUTPUT
+# =========================
+def upload(file_path):
+    media = MediaFileUpload(file_path, mimetype="video/mp4")
 
-def upload_output(path):
-    media = MediaFileUpload(path, mimetype="video/mp4")
     file = drive.files().create(
-        body={"name": "final.mp4", "parents": [OUTPUT_FOLDER]},
+        body={
+            "name": "final.mp4",
+            "parents": [OUTPUT_FOLDER]
+        },
         media_body=media,
-        fields="id",
+        fields="id"
     ).execute()
+
     return file.get("id")
 
-
+# =========================
+# PROCESS PIPELINE
+# =========================
 def process():
-    clips = list_clips()
+    clips = get_clips()
 
     if len(clips) < 3:
-        log("Not enough clips found")
+        log("Not enough clips in Drive")
         return
 
-    local_paths = []
+    local = []
 
+    # DOWNLOAD 3 CLIPS
     for i, clip in enumerate(clips[:3]):
-        local_path = INPUT_DIR / f"clip{i+1}.mp4"
-        download_file(clip["id"], clip["name"], str(local_path))
-        local_paths.append(local_path)
+        path = INPUT_DIR / f"clip{i+1}.mp4"
+        download(clip["id"], path)
+        local.append((clip["id"], path))
 
-    norm_paths = []
-    for i, path in enumerate(local_paths):
+    # NORMALIZE
+    norm = []
+    for i, (_, path) in enumerate(local):
         out = TMP_DIR / f"norm{i}.mp4"
+
         run([
             "ffmpeg", "-y",
             "-i", str(path),
-            "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30",
+            "-vf",
+            "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30",
             "-c:v", "libx264",
             "-preset", "veryfast",
             "-crf", "22",
             str(out)
         ])
-        norm_paths.append(out)
 
-    concat_file = TMP_DIR / "list.txt"
-    concat_file.write_text("\n".join([f"file '{p}'" for p in norm_paths]))
+        norm.append(out)
+
+    # CONCAT
+    list_file = TMP_DIR / "list.txt"
+    list_file.write_text("\n".join([f"file '{p}'" for p in norm]))
 
     merged = TMP_DIR / "merged.mp4"
 
@@ -125,11 +161,12 @@ def process():
         "ffmpeg", "-y",
         "-f", "concat",
         "-safe", "0",
-        "-i", str(concat_file),
+        "-i", str(list_file),
         "-c", "copy",
         str(merged)
     ])
 
+    # CAPTION
     final = TMP_DIR / "final.mp4"
 
     run([
@@ -142,13 +179,17 @@ def process():
         str(final)
     ])
 
-    upload_output(str(final))
+    # UPLOAD RESULT
+    upload(str(final))
 
+    # ARCHIVE ORIGINALS
     for clip in clips[:3]:
-        move_file(clip["id"], ARCHIVE_FOLDER)
+        move(clip["id"], ARCHIVE_FOLDER)
 
     log("DONE")
 
-
+# =========================
+# ENTRY
+# =========================
 if __name__ == "__main__":
     process()
