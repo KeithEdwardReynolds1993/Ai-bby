@@ -531,7 +531,7 @@ HTML = """
     <div class="section-label">Title / Caption</div>
     <div class="caption-wrap">
       <input id="caption" type="text" placeholder="Enter title..." maxlength="100" oninput="onCaptionInput()">
-      <span class="char-count" id="char-count">0 / {{ max_chars }}</span>
+      <span class="char-count" id="char-count">0 / 60</span>
     </div>
   </section>
 
@@ -547,7 +547,7 @@ HTML = """
 </div>
 
 <script>
-  const MAX_CHARS = parseInt("{{ max_chars }}");
+  const MAX_CHARS = 60;
   let allFiles = [];
   let dragSrc = null;
 
