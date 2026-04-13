@@ -1,195 +1,210 @@
 import os
 import json
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
-from google.oauth2 import service_account
+
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
-import io
+from googleapiclient.http import MediaFileUpload
+from google.oauth2 import service_account
+
 
 # =========================
-# PATHS (Render safe)
+# PATHS
 # =========================
+
 TMP_DIR = Path("/tmp/ai_bby")
 INPUT_DIR = TMP_DIR / "input"
 OUTPUT_DIR = TMP_DIR / "output"
 
-TMP_DIR.mkdir(parents=True, exist_ok=True)
 INPUT_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+INPUTS = [
+    INPUT_DIR / "clip1.mp4",
+    INPUT_DIR / "clip2.mp4",
+    INPUT_DIR / "clip3.mp4",
+]
+
+NORMALIZED = [
+    TMP_DIR / "clip1_norm.mp4",
+    TMP_DIR / "clip2_norm.mp4",
+    TMP_DIR / "clip3_norm.mp4",
+]
+
+CONCAT_LIST = TMP_DIR / "clips.txt"
+MERGED = TMP_DIR / "merged.mp4"
+FINAL_TMP = TMP_DIR / "final.mp4"
+FINAL_OUT = OUTPUT_DIR / "final.mp4"
+
+
 # =========================
-# ENV VARS
+# ENV
 # =========================
-CAPTION_TEXT = os.getenv("CAPTION_TEXT", "AI Video")
 
-INCOMING_FOLDER = os.getenv("GOOGLE_DRIVE_INCOMING_FOLDER_ID")
-OUTPUT_FOLDER = os.getenv("GOOGLE_DRIVE_OUTPUT_FOLDER_ID")
-ARCHIVE_FOLDER = os.getenv("GOOGLE_DRIVE_ARCHIVE_FOLDER_ID")
-FAILED_FOLDER = os.getenv("GOOGLE_DRIVE_FAILED_FOLDER_ID")
+CAPTION_TEXT = os.getenv("CAPTION_TEXT", "Fun times in AI village")
 
-SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
+GOOGLE_DRIVE_OUTPUT_FOLDER_ID = os.getenv("GOOGLE_DRIVE_OUTPUT_FOLDER_ID")
 
-SCOPES = ["https://www.googleapis.com/auth/drive"]
-
-creds = service_account.Credentials.from_service_account_info(
-    SERVICE_ACCOUNT_INFO, scopes=SCOPES
+SERVICE_ACCOUNT_INFO = json.loads(
+    os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 )
 
-drive = build("drive", "v3", credentials=creds)
 
 # =========================
-# LOGGING
+# HELPERS
 # =========================
+
 def log(*args):
     print(*args, flush=True)
 
-# =========================
-# SHELL RUNNER
-# =========================
-def run(cmd):
-    log(">>>", " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.stdout:
-        log(result.stdout[-2000:])
-    if result.stderr:
-        log(result.stderr[-2000:])
-    if result.returncode != 0:
-        raise RuntimeError("Command failed")
-    return result
+
+def run_cmd(cmd):
+    log("\n>>>", " ".join(map(str, cmd)))
+    p = subprocess.run(cmd, capture_output=True, text=True)
+
+    if p.stdout:
+        log(p.stdout[-3000:])
+    if p.stderr:
+        log(p.stderr[-3000:])
+
+    if p.returncode != 0:
+        raise RuntimeError(f"Command failed: {cmd}")
+
+    return p
+
 
 # =========================
-# GET CLIPS FROM DRIVE
+# VALIDATION
 # =========================
-def get_clips():
-    query = f"'{INCOMING_FOLDER}' in parents and mimeType contains 'video/'"
-    res = drive.files().list(
-        q=query,
-        fields="files(id, name)",
-        pageSize=3
-    ).execute()
 
-    return res.get("files", [])
+def validate_inputs():
+    missing = [str(p) for p in INPUTS if not p.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Missing input clips:\n" + "\n".join(missing)
+        )
 
-# =========================
-# DOWNLOAD FILE
-# =========================
-def download(file_id, path):
-    request = drive.files().get_media(fileId=file_id)
-    fh = io.FileIO(path, "wb")
-    downloader = MediaIoBaseDownload(fh, request)
-
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
 
 # =========================
-# MOVE FILE
+# FFMEG PIPELINE
 # =========================
-def move(file_id, folder_id):
-    file = drive.files().get(fileId=file_id, fields="parents").execute()
-    prev = ",".join(file.get("parents"))
 
-    drive.files().update(
-        fileId=file_id,
-        addParents=folder_id,
-        removeParents=prev,
-        fields="id, parents"
-    ).execute()
+def normalize(src, dst):
+    run_cmd([
+        "ffmpeg", "-y",
+        "-i", str(src),
+        "-vf",
+        "scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,fps=30,format=yuv420p",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "22",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        str(dst)
+    ])
+
+
+def write_concat():
+    CONCAT_LIST.write_text(
+        "\n".join([f"file '{p}'" for p in NORMALIZED])
+    )
+
+
+def concat():
+    run_cmd([
+        "ffmpeg", "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", str(CONCAT_LIST),
+        "-c", "copy",
+        str(MERGED)
+    ])
+
+
+def add_caption():
+    text = CAPTION_TEXT.replace(":", r"\:")
+
+    vf = (
+        "drawbox=x=120:y=1450:w=840:h=180:"
+        "color=black@0.85:t=fill,"
+        f"drawtext=text='{text}':"
+        "fontcolor=white:fontsize=52:"
+        "x=(w-text_w)/2:y=1507"
+    )
+
+    run_cmd([
+        "ffmpeg", "-y",
+        "-i", str(MERGED),
+        "-vf", vf,
+        "-c:v", "libx264",
+        "-crf", "20",
+        "-preset", "veryfast",
+        "-c:a", "copy",
+        str(FINAL_TMP)
+    ])
+
 
 # =========================
-# UPLOAD OUTPUT
+# GOOGLE DRIVE UPLOAD
 # =========================
-def upload(file_path):
-    media = MediaFileUpload(file_path, mimetype="video/mp4")
 
-    file = drive.files().create(
-        body={
-            "name": "final.mp4",
-            "parents": [OUTPUT_FOLDER]
-        },
+def upload_to_drive(file_path: Path):
+    log("Uploading to Google Drive...")
+
+    creds = service_account.Credentials.from_service_account_info(
+        SERVICE_ACCOUNT_INFO,
+        scopes=["https://www.googleapis.com/auth/drive"]
+    )
+
+    service = build("drive", "v3", credentials=creds)
+
+    file_metadata = {
+        "name": file_path.name,
+        "parents": [GOOGLE_DRIVE_OUTPUT_FOLDER_ID]
+    }
+
+    media = MediaFileUpload(str(file_path), mimetype="video/mp4")
+
+    uploaded = service.files().create(
+        body=file_metadata,
         media_body=media,
         fields="id"
     ).execute()
 
-    return file.get("id")
+    log("Upload complete:", uploaded.get("id"))
+
 
 # =========================
-# PROCESS PIPELINE
+# MAIN
 # =========================
-def process():
-    clips = get_clips()
 
-    if len(clips) < 3:
-        log("Not enough clips in Drive")
-        return
+def main():
+    log("AI Bby Worker Starting...")
 
-    local = []
+    validate_inputs()
 
-    # DOWNLOAD 3 CLIPS
-    for i, clip in enumerate(clips[:3]):
-        path = INPUT_DIR / f"clip{i+1}.mp4"
-        download(clip["id"], path)
-        local.append((clip["id"], path))
+    # Normalize clips
+    for s, d in zip(INPUTS, NORMALIZED):
+        normalize(s, d)
 
-    # NORMALIZE
-    norm = []
-    for i, (_, path) in enumerate(local):
-        out = TMP_DIR / f"norm{i}.mp4"
+    write_concat()
+    concat()
+    add_caption()
 
-        run([
-            "ffmpeg", "-y",
-            "-i", str(path),
-            "-vf",
-            "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "22",
-            str(out)
-        ])
+    # Save local copy
+    shutil.copy2(FINAL_TMP, FINAL_OUT)
 
-        norm.append(out)
+    log("Final created:", FINAL_OUT)
 
-    # CONCAT
-    list_file = TMP_DIR / "list.txt"
-    list_file.write_text("\n".join([f"file '{p}'" for p in norm]))
+    # Upload to Drive
+    if GOOGLE_DRIVE_OUTPUT_FOLDER_ID:
+        upload_to_drive(FINAL_OUT)
+    else:
+        log("No output folder set — skipping upload")
 
-    merged = TMP_DIR / "merged.mp4"
 
-    run([
-        "ffmpeg", "-y",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", str(list_file),
-        "-c", "copy",
-        str(merged)
-    ])
-
-    # CAPTION
-    final = TMP_DIR / "final.mp4"
-
-    run([
-        "ffmpeg", "-y",
-        "-i", str(merged),
-        "-vf",
-        f"drawtext=text='{CAPTION_TEXT}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=h-200",
-        "-c:v", "libx264",
-        "-crf", "20",
-        str(final)
-    ])
-
-    # UPLOAD RESULT
-    upload(str(final))
-
-    # ARCHIVE ORIGINALS
-    for clip in clips[:3]:
-        move(clip["id"], ARCHIVE_FOLDER)
-
-    log("DONE")
-
-# =========================
-# ENTRY
-# =========================
 if __name__ == "__main__":
-    process()
+    main()
