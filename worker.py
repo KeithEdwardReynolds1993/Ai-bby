@@ -1,172 +1,148 @@
 import os
 import json
-import shlex
 import shutil
 import subprocess
 from pathlib import Path
 
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 from google.oauth2 import service_account
 
 
 # =========================
-# PATHS
+# PATHS (TEMP ONLY)
 # =========================
 
-TMP_DIR = Path("/tmp/ai_bby")
-INPUT_DIR = TMP_DIR / "input"
-OUTPUT_DIR = TMP_DIR / "output"
+TMP = Path("/tmp/ai_bby")
+INPUT = TMP / "input"
+OUTPUT = TMP / "output"
 
-INPUT_DIR.mkdir(parents=True, exist_ok=True)
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+INPUT.mkdir(parents=True, exist_ok=True)
+OUTPUT.mkdir(parents=True, exist_ok=True)
 
-INPUTS = [
-    INPUT_DIR / "clip1.mp4",
-    INPUT_DIR / "clip2.mp4",
-    INPUT_DIR / "clip3.mp4",
-]
-
-NORMALIZED = [
-    TMP_DIR / "clip1_norm.mp4",
-    TMP_DIR / "clip2_norm.mp4",
-    TMP_DIR / "clip3_norm.mp4",
-]
-
-CONCAT_LIST = TMP_DIR / "clips.txt"
-MERGED = TMP_DIR / "merged.mp4"
-FINAL_TMP = TMP_DIR / "final.mp4"
-FINAL_OUT = OUTPUT_DIR / "final.mp4"
+MERGED = TMP / "merged.mp4"
+FINAL = TMP / "final.mp4"
 
 
 # =========================
 # ENV
 # =========================
 
-CAPTION_TEXT = os.getenv("CAPTION_TEXT", "Fun times in AI village")
-
-GOOGLE_DRIVE_OUTPUT_FOLDER_ID = os.getenv("GOOGLE_DRIVE_OUTPUT_FOLDER_ID")
-
 SERVICE_ACCOUNT_INFO = json.loads(
     os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 )
 
+INCOMING_FOLDER = os.getenv("GOOGLE_DRIVE_INCOMING_FOLDER_ID")
+OUTPUT_FOLDER = os.getenv("GOOGLE_DRIVE_OUTPUT_FOLDER_ID")
+ARCHIVE_FOLDER = os.getenv("GOOGLE_DRIVE_ARCHIVE_FOLDER_ID")
 
-# =========================
-# HELPERS
-# =========================
-
-def log(*args):
-    print(*args, flush=True)
-
-
-def run_cmd(cmd):
-    log("\n>>>", " ".join(map(str, cmd)))
-    p = subprocess.run(cmd, capture_output=True, text=True)
-
-    if p.stdout:
-        log(p.stdout[-3000:])
-    if p.stderr:
-        log(p.stderr[-3000:])
-
-    if p.returncode != 0:
-        raise RuntimeError(f"Command failed: {cmd}")
-
-    return p
+CAPTION = os.getenv("CAPTION_TEXT", "Made with AI")
 
 
 # =========================
-# VALIDATION
+# GOOGLE CLIENT
 # =========================
 
-def validate_inputs():
-    missing = [str(p) for p in INPUTS if not p.exists()]
-    if missing:
-        raise FileNotFoundError(
-            "Missing input clips:\n" + "\n".join(missing)
-        )
+def drive():
+    creds = service_account.Credentials.from_service_account_info(
+        SERVICE_ACCOUNT_INFO,
+        scopes=["https://www.googleapis.com/auth/drive"]
+    )
+    return build("drive", "v3", credentials=creds)
+
+
+# =========================
+# DRIVE DOWNLOAD INPUTS
+# =========================
+
+def download_inputs():
+    service = drive()
+
+    results = service.files().list(
+        q=f"'{INCOMING_FOLDER}' in parents and trashed=false",
+        fields="files(id, name)"
+    ).execute()
+
+    files = results.get("files", [])
+
+    if not files:
+        raise Exception("No input videos in Drive incoming folder")
+
+    print(f"Found {len(files)} files")
+
+    for i, f in enumerate(files):
+        file_id = f["id"]
+        target = INPUT / f"clip{i+1}.mp4"
+
+        request = service.files().get_media(fileId=file_id)
+        fh = open(target, "wb")
+
+        downloader = MediaIoBaseDownload(fh, request)
+
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+
+        fh.close()
+
+        print("Downloaded:", f["name"])
 
 
 # =========================
 # FFMEG PIPELINE
 # =========================
 
-def normalize(src, dst):
-    run_cmd([
-        "ffmpeg", "-y",
-        "-i", str(src),
-        "-vf",
-        "scale=1080:1920:force_original_aspect_ratio=increase,"
-        "crop=1080:1920,fps=30,format=yuv420p",
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "22",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        str(dst)
-    ])
+def run(cmd):
+    print(">>>", " ".join(cmd))
+    subprocess.run(cmd, check=True)
 
 
-def write_concat():
-    CONCAT_LIST.write_text(
-        "\n".join([f"file '{p}'" for p in NORMALIZED])
+def build_video():
+    clips = sorted(INPUT.glob("*.mp4"))
+
+    if not clips:
+        raise Exception("No downloaded clips found")
+
+    list_file = TMP / "list.txt"
+    list_file.write_text(
+        "\n".join([f"file '{c}'" for c in clips])
     )
 
-
-def concat():
-    run_cmd([
+    run([
         "ffmpeg", "-y",
         "-f", "concat",
         "-safe", "0",
-        "-i", str(CONCAT_LIST),
+        "-i", str(list_file),
         "-c", "copy",
         str(MERGED)
     ])
 
-
-def add_caption():
-    text = CAPTION_TEXT.replace(":", r"\:")
-
-    vf = (
-        "drawbox=x=120:y=1450:w=840:h=180:"
-        "color=black@0.85:t=fill,"
-        f"drawtext=text='{text}':"
-        "fontcolor=white:fontsize=52:"
-        "x=(w-text_w)/2:y=1507"
-    )
-
-    run_cmd([
+    run([
         "ffmpeg", "-y",
         "-i", str(MERGED),
-        "-vf", vf,
+        "-vf",
+        f"drawtext=text='{CAPTION}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=h-200",
         "-c:v", "libx264",
-        "-crf", "20",
         "-preset", "veryfast",
+        "-crf", "20",
         "-c:a", "copy",
-        str(FINAL_TMP)
+        str(FINAL)
     ])
 
 
 # =========================
-# GOOGLE DRIVE UPLOAD
+# UPLOAD OUTPUT
 # =========================
 
-def upload_to_drive(file_path: Path):
-    log("Uploading to Google Drive...")
-
-    creds = service_account.Credentials.from_service_account_info(
-        SERVICE_ACCOUNT_INFO,
-        scopes=["https://www.googleapis.com/auth/drive"]
-    )
-
-    service = build("drive", "v3", credentials=creds)
+def upload_output():
+    service = drive()
 
     file_metadata = {
-        "name": file_path.name,
-        "parents": [GOOGLE_DRIVE_OUTPUT_FOLDER_ID]
+        "name": "final.mp4",
+        "parents": [OUTPUT_FOLDER]
     }
 
-    media = MediaFileUpload(str(file_path), mimetype="video/mp4")
+    media = MediaFileUpload(str(FINAL), mimetype="video/mp4")
 
     uploaded = service.files().create(
         body=file_metadata,
@@ -174,7 +150,29 @@ def upload_to_drive(file_path: Path):
         fields="id"
     ).execute()
 
-    log("Upload complete:", uploaded.get("id"))
+    print("Uploaded:", uploaded.get("id"))
+
+
+# =========================
+# ARCHIVE INPUTS
+# =========================
+
+def archive_inputs():
+    service = drive()
+
+    files = service.files().list(
+        q=f"'{INCOMING_FOLDER}' in parents and trashed=false",
+        fields="files(id, name)"
+    ).execute().get("files", [])
+
+    for f in files:
+        service.files().update(
+            fileId=f["id"],
+            addParents=ARCHIVE_FOLDER,
+            removeParents=INCOMING_FOLDER
+        ).execute()
+
+    print("Archived inputs")
 
 
 # =========================
@@ -182,28 +180,14 @@ def upload_to_drive(file_path: Path):
 # =========================
 
 def main():
-    log("AI Bby Worker Starting...")
+    print("AI VIDEO PIPELINE START")
 
-    validate_inputs()
+    download_inputs()
+    build_video()
+    upload_output()
+    archive_inputs()
 
-    # Normalize clips
-    for s, d in zip(INPUTS, NORMALIZED):
-        normalize(s, d)
-
-    write_concat()
-    concat()
-    add_caption()
-
-    # Save local copy
-    shutil.copy2(FINAL_TMP, FINAL_OUT)
-
-    log("Final created:", FINAL_OUT)
-
-    # Upload to Drive
-    if GOOGLE_DRIVE_OUTPUT_FOLDER_ID:
-        upload_to_drive(FINAL_OUT)
-    else:
-        log("No output folder set — skipping upload")
+    print("DONE")
 
 
 if __name__ == "__main__":
