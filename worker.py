@@ -76,7 +76,7 @@ def ffmpeg_escape(text):
 
 
 def wrap_caption(text, max_chars_per_line=20):
-    """Wrap caption text so it fits on screen."""
+    """Wrap caption into multiple drawtext calls stacked vertically."""
     words = text.split()
     lines = []
     current = []
@@ -88,7 +88,7 @@ def wrap_caption(text, max_chars_per_line=20):
             current.append(word)
     if current:
         lines.append(" ".join(current))
-    return r"\n".join(lines)
+    return lines
 
 def get_duration(path):
     r = subprocess.run(
@@ -299,7 +299,7 @@ def generate_caption(vision):
                         f"You write short punchy video captions. Max {MAX_CAPTION_CHARS} chars. "
                         "Captions will be word-wrapped at ~20 characters per line and displayed "
                         "centered on a vertical video. Write captions that read naturally across "
-                        "2-3 short lines — avoid long unbroken phrases. Think punchy, bold, short words. "
+                        "2-3 short lines. Each line max 3-4 words. Never write one long sentence. Break after every thought. "
                         "Return ONLY JSON with key: caption"
                     )
                 },
@@ -375,16 +375,26 @@ def run_pipeline():
             ])
 
             final_path = OUTPUT / "final.mp4"
-            wrapped = wrap_caption(caption, max_chars_per_line=20)
-            safe_caption = ffmpeg_escape(wrapped)
-            vf = (
-                f"scale=1080:1920:force_original_aspect_ratio=decrease,"
-                f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,"
-                f"drawtext=text='{safe_caption}':"
-                f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:"
-                f"fontcolor=white:fontsize=52:x=(w-text_w)/2:y=(h-text_h)/2:"
-                f"box=1:boxcolor=black@0.72:boxborderw=36:line_spacing=8"
+            lines = wrap_caption(caption, max_chars_per_line=22)
+            fontsize = 52
+            line_height = fontsize + 12
+            total_height = len(lines) * line_height
+            # Stack drawtext filters for each line
+            base = (
+                "scale=1080:1920:force_original_aspect_ratio=decrease,"
+                "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
             )
+            drawtext_filters = []
+            for i, line in enumerate(lines):
+                safe_line = ffmpeg_escape(line)
+                y_offset = f"(h-{total_height})/2+{i * line_height}"
+                drawtext_filters.append(
+                    f"drawtext=text='{safe_line}':"
+                    f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:"
+                    f"fontcolor=white:fontsize={fontsize}:x=(w-text_w)/2:y={y_offset}:"
+                    f"box=1:boxcolor=black@0.72:boxborderw=20"
+                )
+            vf = base + "," + ",".join(drawtext_filters)
             run_cmd([
                 "ffmpeg", "-y",
                 "-i", str(trimmed),
