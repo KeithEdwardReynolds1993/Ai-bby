@@ -746,12 +746,10 @@ HTML = """<!DOCTYPE html>
   --warn: #ffb800; --success: #00e676; --radius: 12px;
 }
 body { font-family: 'Syne', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; padding: 40px 24px; }
-.wrap { max-width: 1200px; margin: 0 auto; }
+.wrap { max-width: 720px; margin: 0 auto; }
 header { display: flex; align-items: baseline; gap: 16px; margin-bottom: 48px; }
 h1 { font-size: 2.4rem; font-weight: 800; letter-spacing: -0.03em; color: var(--accent); }
 .subtitle { font-family: 'DM Mono', monospace; font-size: .75rem; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }
-.layout { display: grid; grid-template-columns: 480px 1fr; gap: 48px; align-items: start; }
-@media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
 section { margin-bottom: 32px; }
 .section-label { font-family: 'DM Mono', monospace; font-size: .7rem; letter-spacing: .15em; text-transform: uppercase; color: var(--muted); margin-bottom: 14px; display: flex; align-items: center; gap: 10px; }
 .section-label::after { content: ''; flex: 1; height: 1px; background: var(--border); }
@@ -799,27 +797,6 @@ section { margin-bottom: 32px; }
 .refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
 .no-music-btn { background: none; border: 1px dashed var(--border); border-radius: var(--radius); color: var(--muted); font-family: 'DM Mono', monospace; font-size: .75rem; padding: 10px 18px; cursor: pointer; width: 100%; text-align: left; transition: border-color .15s; }
 .no-music-btn:hover, .no-music-btn.selected { border-color: var(--accent); color: var(--accent); }
-.gen-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; }
-.gen-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; display: flex; flex-direction: column; transition: border-color .15s; }
-.gen-card:hover { border-color: var(--border); }
-.gen-thumb { width: 100%; height: 160px; object-fit: cover; background: var(--surface2); display: block; }
-.gen-thumb-placeholder { width: 100%; height: 160px; background: var(--surface2); display: flex; align-items: center; justify-content: center; font-size: 2.5rem; }
-.gen-body { padding: 14px 16px; flex: 1; display: flex; flex-direction: column; gap: 6px; }
-.gen-caption { font-size: .9rem; font-weight: 700; line-height: 1.3; }
-.gen-status { display: inline-flex; align-items: center; gap: 6px; font-family: 'DM Mono', monospace; font-size: .65rem; font-weight: 700; padding: 3px 8px; border-radius: 20px; width: fit-content; }
-.status-awaiting_approval { background: rgba(255,184,0,.15); color: var(--warn); border: 1px solid rgba(255,184,0,.3); }
-.status-approved { background: rgba(124,77,255,.15); color: var(--accent2); border: 1px solid rgba(124,77,255,.3); }
-.status-posting { background: rgba(0,230,118,.1); color: var(--success); border: 1px solid rgba(0,230,118,.2); }
-.status-posted { background: rgba(0,230,118,.15); color: var(--success); border: 1px solid rgba(0,230,118,.3); }
-.status-post_error { background: rgba(255,77,109,.15); color: var(--danger); border: 1px solid rgba(255,77,109,.3); }
-.gen-meta { font-family: 'DM Mono', monospace; font-size: .65rem; color: var(--muted); line-height: 1.6; }
-.gen-date { font-family: 'DM Mono', monospace; font-size: .62rem; color: var(--muted); }
-.gen-error { font-family: 'DM Mono', monospace; font-size: .65rem; color: var(--danger); word-break: break-all; }
-.gen-actions { display: flex; gap: 8px; margin-top: 8px; }
-.approve-btn { flex: 1; background: var(--accent); color: #0a0a0f; border: none; border-radius: 8px; padding: 9px; font-family: 'Syne', sans-serif; font-size: .82rem; font-weight: 800; cursor: pointer; transition: opacity .15s; }
-.approve-btn:hover { opacity: .85; }
-.post-btn { flex: 1; background: var(--accent2); color: white; border: none; border-radius: 8px; padding: 9px; font-family: 'Syne', sans-serif; font-size: .82rem; font-weight: 800; cursor: pointer; transition: opacity .15s; }
-.post-btn:hover { opacity: .85; }
 </style>
 </head>
 <body>
@@ -829,60 +806,46 @@ section { margin-bottom: 32px; }
     <span class="subtitle">AI Video Director</span>
   </header>
 
-  <div class="layout">
-    <div>
-      <section>
-        <div class="section-header">
-          <div class="section-label">Clips from Drive</div>
-          <button class="refresh-btn" id="refresh-btn">&#8635; Refresh</button>
-        </div>
-        <div id="clip-list"><div class="empty">Loading clips...</div></div>
-      </section>
-
-      <section>
-        <div class="section-header">
-          <div class="section-label">Music</div>
-          <button class="refresh-btn" id="refresh-music-btn">&#8635; Refresh</button>
-        </div>
-        <div id="music-list"><div class="empty">Loading music...</div></div>
-      </section>
-
-      <section>
-        <div class="section-label">Title / Caption</div>
-        <div class="caption-wrap">
-          <input id="caption" type="text" placeholder="Enter title..." maxlength="100">
-          <span class="char-count" id="char-count">0 / 60</span>
-        </div>
-      </section>
-
-      <section>
-        <div class="section-label">AI Director</div>
-        <input id="ai-prompt" type="text" placeholder='e.g. "hype reel, fast cuts"'>
-        <div id="ai-plan"><div class="plan-label">AI Plan</div><div id="ai-plan-text"></div></div>
-        <div class="btn-row">
-          <button id="ask-ai-btn">Ask AI</button>
-          <button id="run-btn" disabled>
-            <span class="spinner" id="spinner"></span>
-            <span id="btn-label">Run Pipeline</span>
-          </button>
-        </div>
-      </section>
-
-      <div id="log-wrap">
-        <div class="section-label" style="margin-bottom:14px;">Pipeline Log</div>
-        <div id="log"></div>
-      </div>
+  <section>
+    <div class="section-header">
+      <div class="section-label">Clips from Drive</div>
+      <button class="refresh-btn" id="refresh-btn">&#8635; Refresh</button>
     </div>
+    <div id="clip-list"><div class="empty">Loading clips...</div></div>
+  </section>
 
-    <div>
-      <section>
-        <div class="section-header">
-          <div class="section-label">Generations</div>
-          <button class="refresh-btn" id="refresh-gens-btn">&#8635; Refresh</button>
-        </div>
-        <div id="gen-grid" class="gen-grid"><div class="empty">No generations yet.</div></div>
-      </section>
+  <section>
+    <div class="section-header">
+      <div class="section-label">Music</div>
+      <button class="refresh-btn" id="refresh-music-btn">&#8635; Refresh</button>
     </div>
+    <div id="music-list"><div class="empty">Loading music...</div></div>
+  </section>
+
+  <section>
+    <div class="section-label">Title / Caption</div>
+    <div class="caption-wrap">
+      <input id="caption" type="text" placeholder="Enter title..." maxlength="100">
+      <span class="char-count" id="char-count">0 / 60</span>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-label">AI Director</div>
+    <input id="ai-prompt" type="text" placeholder='e.g. "hype reel, fast cuts"'>
+    <div id="ai-plan"><div class="plan-label">AI Plan</div><div id="ai-plan-text"></div></div>
+    <div class="btn-row">
+      <button id="ask-ai-btn">Ask AI</button>
+      <button id="run-btn" disabled>
+        <span class="spinner" id="spinner"></span>
+        <span id="btn-label">Run Pipeline</span>
+      </button>
+    </div>
+  </section>
+
+  <div id="log-wrap">
+    <div class="section-label" style="margin-bottom:14px;">Pipeline Log</div>
+    <div id="log"></div>
   </div>
 </div>
 
@@ -1038,115 +1001,6 @@ function renderMusic() {
   });
 }
 
-function loadGenerations() {
-  fetch("/api/generations")
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      renderGenerations(data.generations || []);
-    })
-    .catch(function() {
-      var grid = document.getElementById("gen-grid");
-      grid.innerHTML = "<div class='empty'>Failed to load generations.</div>";
-    });
-}
-
-function statusLabel(s) {
-  return {
-    awaiting_approval: "⏳ Awaiting Approval",
-    approved: "✅ Approved",
-    posting: "📤 Posting...",
-    posted: "🎉 Posted",
-    post_error: "❌ Post Error"
-  }[s] || s;
-}
-
-function renderGenerations(gens) {
-  var grid = document.getElementById("gen-grid");
-  if (!gens.length) {
-    grid.innerHTML = "<div class='empty'>No generations yet.</div>";
-    return;
-  }
-
-  grid.innerHTML = "";
-
-  gens.forEach(function(g) {
-    var card = document.createElement("div");
-    card.className = "gen-card";
-    card.dataset.id = g.id;
-
-    var thumbHtml;
-    if (g.drive_thumb_url) {
-      thumbHtml = '<img class="gen-thumb" src="' + g.drive_thumb_url + '">';
-    } else {
-      thumbHtml = '<div class="gen-thumb-placeholder">🎬</div>';
-    }
-
-    var date = new Date(g.created_at + "Z").toLocaleString();
-    var metaParts = [];
-    if (g.vibe) metaParts.push("Vibe: " + g.vibe);
-    if (g.music) metaParts.push(g.music);
-    if (g.cut_style) metaParts.push(g.cut_style);
-    if (g.speed) metaParts.push(g.speed + "x");
-
-    var actionsHtml = "";
-    if (g.status === "awaiting_approval") {
-      actionsHtml = "<div class='gen-actions'><button class='approve-btn' onclick='approveGen(" + g.id + ")'>✓ Approve</button></div>";
-    } else if (g.status === "approved") {
-      actionsHtml = "<div class='gen-actions'><button class='post-btn' onclick='postGen(" + g.id + ")'>🚀 Post Now</button></div>";
-    } else if (g.status === "post_error") {
-      actionsHtml = "<div class='gen-actions'><button class='post-btn' onclick='postGen(" + g.id + ")'>🔁 Retry</button></div>";
-    }
-
-    card.innerHTML =
-      thumbHtml +
-      "<div class='gen-body'>" +
-        "<div class='gen-caption'>" + (g.caption || "") + "</div>" +
-        "<span class='gen-status status-" + g.status + "'>" + statusLabel(g.status) + "</span>" +
-        "<div class='gen-meta'>" + metaParts.join(" &bull; ") + "</div>" +
-        (g.post_error ? "<div class='gen-error'>" + g.post_error + "</div>" : "") +
-        "<div class='gen-date'>" + date + "</div>" +
-        actionsHtml +
-      "</div>";
-
-    grid.appendChild(card);
-
-    var img = card.querySelector(".gen-thumb");
-    if (img) {
-      img.onerror = function() {
-        this.outerHTML = '<div class="gen-thumb-placeholder">🎬</div>';
-      };
-    }
-  });
-}
-
-function approveGen(id) {
-  fetch("/api/generations/" + id + "/approve", { method: "POST" })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      if (data.ok) loadGenerations();
-      else alert("Error: " + data.error);
-    });
-}
-
-function postGen(id) {
-  if (!confirm("Post to TikTok + Instagram now?")) return;
-
-  var card = document.querySelector(".gen-card[data-id='" + id + "']");
-  if (card) {
-    var a = card.querySelector(".gen-actions");
-    if (a) {
-      a.innerHTML = "<span style='color:var(--success);font-family:monospace;font-size:.8rem'>Posting...</span>";
-    }
-  }
-
-  fetch("/api/generations/" + id + "/post", { method: "POST" })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      setTimeout(loadGenerations, 2000);
-      if (data.error) alert("Error: " + data.error);
-    });
-}
-
 function syncOrder() {
   var ids = Array.from(document.querySelectorAll(".clip-item")).map(function(el) {
     return el.dataset.id;
@@ -1264,9 +1118,24 @@ function runPipeline() {
       caption_fade_out: aiSettings.caption_fade_out,
       ken_burns: aiSettings.ken_burns
     })
-  }).then(function() {
-    pollLog();
-  });
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) {
+        document.getElementById("spinner").style.display = "none";
+        document.getElementById("run-btn").disabled = false;
+        document.getElementById("btn-label").textContent = "Run Pipeline";
+        document.getElementById("log").textContent = "Error: " + data.error;
+        return;
+      }
+      pollLog();
+    })
+    .catch(function(err) {
+      document.getElementById("spinner").style.display = "none";
+      document.getElementById("run-btn").disabled = false;
+      document.getElementById("btn-label").textContent = "Run Pipeline";
+      document.getElementById("log").textContent = "Request failed: " + err;
+    });
 }
 
 function pollLog() {
@@ -1283,7 +1152,6 @@ function pollLog() {
           document.getElementById("spinner").style.display = "none";
           document.getElementById("run-btn").disabled = false;
           document.getElementById("btn-label").textContent = data.done ? "Done - Run Again" : "Run Pipeline";
-          if (data.done) setTimeout(loadGenerations, 1500);
         }
       });
   }, 1000);
@@ -1300,7 +1168,6 @@ document.getElementById("caption").addEventListener("input", function() {
 
 document.getElementById("refresh-btn").addEventListener("click", loadClips);
 document.getElementById("refresh-music-btn").addEventListener("click", loadMusic);
-document.getElementById("refresh-gens-btn").addEventListener("click", loadGenerations);
 document.getElementById("run-btn").addEventListener("click", runPipeline);
 document.getElementById("ask-ai-btn").addEventListener("click", askAI);
 document.getElementById("ai-prompt").addEventListener("keydown", function(e) {
@@ -1309,8 +1176,6 @@ document.getElementById("ai-prompt").addEventListener("keydown", function(e) {
 
 loadClips();
 loadMusic();
-loadGenerations();
-setInterval(loadGenerations, 30000);
 </script>
 </body>
 </html>"""
@@ -1350,43 +1215,48 @@ def api_ai_plan():
 @app.route("/api/run", methods=["POST"])
 def api_run():
     global pipeline_status
-    if pipeline_status.get("running"):
-        return jsonify({"error": "Already running"}), 409
-
-    data = request.json or {}
-    selected_files = data.get("files", [])
-    caption = data.get("caption", "").strip()
-
-    if not selected_files or not caption:
-        return jsonify({"error": "Missing files or caption"}), 400
 
     try:
+        if pipeline_status.get("running"):
+            return jsonify({"error": "Already running"}), 409
+
+        data = request.json or {}
+        print("API /run payload:", data)
+
+        selected_files = data.get("files", [])
+        caption = data.get("caption", "").strip()
+
+        if not selected_files or not caption:
+            return jsonify({"error": "Missing files or caption"}), 400
+
         file_hash = hash_files(selected_files)
+        existing = db_find_by_hash(file_hash)
+        if existing:
+            return jsonify({"ok": True, "skipped": True, "existing_gen_id": existing[0]})
+
+        thread = threading.Thread(
+            target=run_pipeline,
+            args=(
+                selected_files,
+                caption,
+                float(data.get("speed") or 1.0),
+                data.get("vibe") or "normal",
+                data.get("music_file"),
+                data.get("cut_style") or "every_downbeat",
+                data.get("transition") or "cut",
+                float(data.get("caption_fade_in") or 0.5),
+                float(data.get("caption_fade_out") or 1.0),
+                bool(data.get("ken_burns") or False),
+            ),
+            daemon=True
+        )
+        thread.start()
+        return jsonify({"ok": True})
+
     except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-    existing = db_find_by_hash(file_hash)
-    if existing:
-        return jsonify({"ok": True, "skipped": True, "existing_gen_id": existing[0]})
-
-    thread = threading.Thread(
-        target=run_pipeline,
-        args=(
-            selected_files,
-            caption,
-            float(data.get("speed") or 1.0),
-            data.get("vibe") or "normal",
-            data.get("music_file"),
-            data.get("cut_style") or "every_downbeat",
-            data.get("transition") or "cut",
-            float(data.get("caption_fade_in") or 0.5),
-            float(data.get("caption_fade_out") or 1.0),
-            bool(data.get("ken_burns") or False),
-        ),
-        daemon=True
-    )
-    thread.start()
-    return jsonify({"ok": True})
+        print("api_run error:", e)
+        print(traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/status")
 def api_status():
