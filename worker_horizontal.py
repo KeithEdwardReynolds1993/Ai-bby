@@ -276,7 +276,7 @@ def find_clean_cut(video_path, target_time, search_window=2.0):
 # AI — pick best quote + music
 # =============================================================================
 
-def analyze_with_ai(transcript, music_files, style_guide=""):
+def analyze_with_ai(transcript, music_files, style_guide="", prompt=""):
     if not OPENAI_API_KEY:
         raise ValueError("OPENAI_API_KEY not set")
 
@@ -299,7 +299,7 @@ def analyze_with_ai(transcript, music_files, style_guide=""):
             "model": "gpt-4o",
             "messages": [
                 {"role": "system", "content": system},
-                {"role": "user", "content": f"Transcript:\n{transcript[:6000]}\n\nMusic:\n{music_list}"}
+                {"role": "user", "content": f"Transcript:\n{transcript[:6000]}\n\nMusic:\n{music_list}" + (f"\n\nDirector note: {prompt}" if prompt else "")}
             ],
             "temperature": 0.7
         },
@@ -328,7 +328,7 @@ def analyze_with_ai(transcript, music_files, style_guide=""):
 # PIPELINE
 # =============================================================================
 
-def run_pipeline():
+def run_pipeline(prompt=""):
     global pipeline_status
     with pipeline_lock:
         pipeline_status = {"running": True, "log": [], "done": False, "error": None}
@@ -354,7 +354,7 @@ def run_pipeline():
             plog(f"Found {len(music_files)} music track(s)")
 
             plog("AI analyzing transcript...")
-            result, selected_music = analyze_with_ai(transcript, music_files, style_guide)
+            result, selected_music = analyze_with_ai(transcript, music_files, style_guide, prompt)
             plog(f"Best moment: {result.get('explanation', '')}")
             plog(f"Quote: {result.get('quote', '')}")
             plog(f"Approx start: {result.get('start_time', 0):.1f}s")
@@ -493,9 +493,7 @@ h1{font-size:1.4rem;font-weight:900;color:#00a6ff;margin-bottom:2px}
 .clip-info{flex:1;overflow:hidden}
 .clip-name{font-size:.8rem;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#fff}
 .clip-meta{font-size:.65rem;color:#333;font-family:monospace;margin-top:3px}
-#go-btn{width:100%;background:#00a6ff;color:#000;border:none;border-radius:10px;padding:14px;font-size:1rem;font-weight:900;cursor:pointer;transition:opacity .15s;margin-bottom:10px;letter-spacing:.05em}
-#go-btn:hover{opacity:.8}
-#go-btn:disabled{opacity:.2;cursor:not-allowed}
+
 #refresh-btn{width:100%;background:none;border:1px solid #1a1a1a;border-radius:8px;color:#222;font-size:.65rem;font-family:monospace;padding:8px;cursor:pointer;transition:border-color .15s,color .15s;margin-bottom:24px}
 #refresh-btn:hover{border-color:#00a6ff;color:#00a6ff}
 #log{font-family:monospace;font-size:.68rem;line-height:1.8;color:#333;max-height:320px;overflow-y:auto;white-space:pre-wrap}
@@ -515,7 +513,10 @@ h1{font-size:1.4rem;font-weight:900;color:#00a6ff;margin-bottom:2px}
       <div class="clip-meta"></div>
     </div>
   </div>
-  <button id="go-btn">GENERATE CLIP</button>
+  <div style="position:relative;margin-bottom:10px">
+    <input id="prompt" style="width:100%;background:#0d0d0d;border:1px solid #1c1c1c;border-radius:10px;padding:13px 48px 13px 14px;font-size:.9rem;color:#fff;outline:none" placeholder="Director note e.g. focus on ROI moments...">
+    <button id="go-btn" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);width:32px;height:32px;background:#00a6ff;color:#000;border:none;border-radius:7px;font-weight:900;cursor:pointer;font-size:.9rem">&#9654;</button>
+  </div>
   <button id="refresh-btn">&#8635; Refresh Clip</button>
   <div id="log"></div>
 </div>
@@ -545,7 +546,8 @@ function go() {
   busy = true;
   document.getElementById("go-btn").disabled = true;
   setLog("Starting...", "active");
-  fetch("/api/run", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"})
+  var prompt = document.getElementById("prompt").value.trim();
+  fetch("/api/run", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({prompt: prompt})})
     .then(function(r) { return r.json(); })
     .then(function(data) {
       if (data.error) { setLog("Error: " + data.error, "error"); busy = false; document.getElementById("go-btn").disabled = false; return; }
@@ -592,7 +594,9 @@ def api_latest_clip():
 def api_run():
     if pipeline_status.get("running"):
         return jsonify({"error": "Already running"}), 409
-    threading.Thread(target=run_pipeline, daemon=True).start()
+    data = request.json or {}
+    prompt = data.get("prompt", "").strip()
+    threading.Thread(target=run_pipeline, args=(prompt,), daemon=True).start()
     return jsonify({"ok": True})
 
 @app.route("/api/status")
