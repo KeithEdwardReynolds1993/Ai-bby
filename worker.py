@@ -381,7 +381,7 @@ def run_pipeline():
                 f"scale=1080:1920:force_original_aspect_ratio=decrease,"
                 f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,"
                 f"drawtext=text='{safe_caption}':"
-                f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
+                f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:"
                 f"fontcolor=white:fontsize=52:x=(w-text_w)/2:y=(h-text_h)/2:"
                 f"box=1:boxcolor=black@0.72:boxborderw=36:line_spacing=8"
             )
