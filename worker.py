@@ -76,15 +76,25 @@ def init_db():
     conn.close()
 
 def db_insert_generation(caption, vibe, music, cut_style, transition, speed,
-                          drive_file_id, drive_file_name, file_hash):
+                         drive_file_id, drive_file_name, file_hash):
     conn = sqlite3.connect(str(DB_PATH))
     cur = conn.execute("""
         INSERT INTO generations
         (created_at, caption, vibe, music, cut_style, transition, speed,
          drive_file_id, drive_file_name, file_hash, status)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_approval')
-    """, (datetime.utcnow().isoformat(), caption, vibe, music, cut_style,
-          transition, speed, drive_file_id, drive_file_name, file_hash))
+    """, (
+        datetime.utcnow().isoformat(),
+        caption,
+        vibe,
+        music,
+        cut_style,
+        transition,
+        speed,
+        drive_file_id,
+        drive_file_name,
+        file_hash
+    ))
     conn.commit()
     row_id = cur.lastrowid
     conn.close()
@@ -205,8 +215,10 @@ def upload_output(final_path):
     file_metadata = {"name": final_path.name, "parents": [OUTPUT_FOLDER]}
     media = MediaFileUpload(str(final_path), mimetype="video/mp4")
     uploaded = service.files().create(
-        body=file_metadata, media_body=media,
-        fields="id, name, thumbnailLink", supportsAllDrives=True
+        body=file_metadata,
+        media_body=media,
+        fields="id, name, thumbnailLink",
+        supportsAllDrives=True
     ).execute()
     log(f"Uploaded: {uploaded.get('name')} ({uploaded.get('id')})")
     return uploaded
@@ -215,7 +227,9 @@ def get_drive_thumb(file_id):
     try:
         service = drive()
         f = service.files().get(
-            fileId=file_id, fields="thumbnailLink", supportsAllDrives=True
+            fileId=file_id,
+            fields="thumbnailLink",
+            supportsAllDrives=True
         ).execute()
         return f.get("thumbnailLink", "")
     except Exception:
@@ -267,7 +281,8 @@ def ffmpeg_escape(text):
 def get_video_duration(path):
     result = subprocess.run(
         ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(path)],
-        capture_output=True, text=True
+        capture_output=True,
+        text=True
     )
     info = json.loads(result.stdout)
     return float(info["format"]["duration"])
@@ -284,10 +299,16 @@ def get_vibe_filters(vibe):
     return filters.get(vibe, "")
 
 XFADE_TRANSITIONS = {
-    "cut": None, "fade": "fade", "dissolve": "dissolve",
-    "wipeleft": "wipeleft", "wiperight": "wiperight",
-    "slideleft": "slideleft", "slideright": "slideright",
-    "zoom": "zoom", "pixelize": "pixelize", "radial": "radial",
+    "cut": None,
+    "fade": "fade",
+    "dissolve": "dissolve",
+    "wipeleft": "wipeleft",
+    "wiperight": "wiperight",
+    "slideleft": "slideleft",
+    "slideright": "slideright",
+    "zoom": "zoom",
+    "pixelize": "pixelize",
+    "radial": "radial",
 }
 
 
@@ -308,9 +329,13 @@ def analyze_music(music_path):
     duration = float(len(y) / sr)
     log(f"BPM: {tempo:.1f} | Downbeats: {len(downbeat_times)} | Duration: {duration:.1f}s")
     return {
-        "bpm": tempo, "beat_times": beat_times.tolist(),
-        "downbeat_times": downbeat_times, "duration": duration,
-        "energy_mean": energy_mean, "energy_max": energy_max, "brightness": brightness,
+        "bpm": tempo,
+        "beat_times": beat_times.tolist(),
+        "downbeat_times": downbeat_times,
+        "duration": duration,
+        "energy_mean": energy_mean,
+        "energy_max": energy_max,
+        "brightness": brightness,
     }
 
 def get_cut_times(music_analysis, cut_style, num_clips, total_video_duration):
@@ -343,11 +368,18 @@ def ask_openai(prompt, clip_names, music_files=None):
     user = f"Clips: {', '.join(clip_names)}\n\nMusic:\n{music_list}\n\nPrompt: {prompt}"
     resp = requests.post(
         "https://api.openai.com/v1/chat/completions",
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {OPENAI_API_KEY}"},
-        json={"model": "gpt-4o", "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user}
-        ], "temperature": 0.7},
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OPENAI_API_KEY}"
+        },
+        json={
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user}
+            ],
+            "temperature": 0.7
+        },
         timeout=30
     )
     if not resp.ok:
@@ -368,12 +400,24 @@ def post_to_tiktok(video_path, caption):
     video_size = os.path.getsize(str(video_path))
     init_resp = requests.post(
         "https://open.tiktokapis.com/v2/post/publish/video/init/",
-        headers={"Authorization": f"Bearer {TIKTOK_ACCESS_TOKEN}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {TIKTOK_ACCESS_TOKEN}",
+            "Content-Type": "application/json"
+        },
         json={
-            "post_info": {"title": caption, "privacy_level": "PUBLIC_TO_EVERYONE",
-                          "disable_duet": False, "disable_comment": False, "disable_stitch": False},
-            "source_info": {"source": "FILE_UPLOAD", "video_size": video_size,
-                            "chunk_size": video_size, "total_chunk_count": 1}
+            "post_info": {
+                "title": caption,
+                "privacy_level": "PUBLIC_TO_EVERYONE",
+                "disable_duet": False,
+                "disable_comment": False,
+                "disable_stitch": False
+            },
+            "source_info": {
+                "source": "FILE_UPLOAD",
+                "video_size": video_size,
+                "chunk_size": video_size,
+                "total_chunk_count": 1
+            }
         }
     )
     if not init_resp.ok:
@@ -385,8 +429,10 @@ def post_to_tiktok(video_path, caption):
         video_bytes = f.read()
     upload_resp = requests.put(
         upload_url,
-        headers={"Content-Type": "video/mp4",
-                 "Content-Range": f"bytes 0-{len(video_bytes)-1}/{len(video_bytes)}"},
+        headers={
+            "Content-Type": "video/mp4",
+            "Content-Range": f"bytes 0-{len(video_bytes)-1}/{len(video_bytes)}"
+        },
         data=video_bytes
     )
     if not upload_resp.ok:
@@ -399,15 +445,21 @@ def post_to_instagram(video_path, caption):
         raise ValueError("INSTAGRAM_ACCESS_TOKEN or INSTAGRAM_ACCOUNT_ID not set")
     container_resp = requests.post(
         f"https://graph.facebook.com/v19.0/{INSTAGRAM_ACCOUNT_ID}/media",
-        params={"media_type": "REELS", "caption": caption,
-                "access_token": INSTAGRAM_ACCESS_TOKEN}
+        params={
+            "media_type": "REELS",
+            "caption": caption,
+            "access_token": INSTAGRAM_ACCESS_TOKEN
+        }
     )
     if not container_resp.ok:
         raise ValueError(f"Instagram container failed: {container_resp.text}")
     creation_id = container_resp.json()["id"]
     publish_resp = requests.post(
         f"https://graph.facebook.com/v19.0/{INSTAGRAM_ACCOUNT_ID}/media_publish",
-        params={"creation_id": creation_id, "access_token": INSTAGRAM_ACCESS_TOKEN}
+        params={
+            "creation_id": creation_id,
+            "access_token": INSTAGRAM_ACCESS_TOKEN
+        }
     )
     if not publish_resp.ok:
         raise ValueError(f"Instagram publish failed: {publish_resp.text}")
@@ -442,8 +494,7 @@ def post_generation(gen_id):
     if errors:
         db_update_status(gen_id, "post_error", post_error="; ".join(errors))
         raise ValueError("; ".join(errors))
-    else:
-        db_update_status(gen_id, "posted")
+    db_update_status(gen_id, "posted")
 
 
 # ─── Core pipeline ────────────────────────────────────────────────────────────
@@ -454,11 +505,12 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
                 ken_burns=False):
     ensure_dirs()
     clean_run_artifacts()
+
     if len(caption) > MAX_CAPTION_CHARS:
         raise ValueError(f"Caption too long ({len(caption)} chars). Max {MAX_CAPTION_CHARS}.")
+
     service = drive()
 
-    # Download + transcode
     local_clips = []
     for i, f in enumerate(selected_files):
         target = INPUT / f"clip{i+1:02d}.mp4"
@@ -466,12 +518,13 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
         download_file(service, f, raw)
         if not target.exists():
             log(f"Transcoding clip{i+1} to H264...")
-            run(["ffmpeg", "-y", "-i", str(raw),
-                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                 "-c:a", "aac", "-b:a", "128k", str(target)])
+            run([
+                "ffmpeg", "-y", "-i", str(raw),
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                "-c:a", "aac", "-b:a", "128k", str(target)
+            ])
         local_clips.append(target)
 
-    # Download music
     music_path = None
     music_analysis = None
     if music_file_obj:
@@ -479,7 +532,6 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
         download_file(service, music_file_obj, music_path)
         music_analysis = analyze_music(music_path)
 
-    # Cap each clip
     capped_clips = []
     for i, clip in enumerate(local_clips):
         dur = get_video_duration(clip)
@@ -489,7 +541,6 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
         log(f"Clip{i+1}: {dur:.1f}s -> capped at {MAX_OUTPUT_DURATION}s")
     local_clips = capped_clips
 
-    # Speed
     if abs(speed - 1.0) > 0.01:
         sped_clips = []
         for i, clip in enumerate(local_clips):
@@ -503,51 +554,51 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
     total_duration = sum(durations)
     log(f"Total duration before cap: {total_duration:.1f}s")
 
-    # Beat sync
     if music_analysis and cut_style != "cut":
         cut_times = get_cut_times(music_analysis, cut_style, len(local_clips), total_duration)
         cut_times = [t for t in cut_times if t < MAX_OUTPUT_DURATION]
         boundaries = [0.0] + cut_times + [min(total_duration, MAX_OUTPUT_DURATION)]
-        segment_durations = [boundaries[i+1] - boundaries[i] for i in range(len(boundaries)-1)]
+        segment_durations = [boundaries[i + 1] - boundaries[i] for i in range(len(boundaries) - 1)]
         trimmed_clips = []
-        for i, (clip, seg_dur) in enumerate(zip(
-            (local_clips * ((len(segment_durations) // len(local_clips)) + 1))[:len(segment_durations)],
-            segment_durations
-        )):
+
+        clip_sequence = (local_clips * ((len(segment_durations) // len(local_clips)) + 1))[:len(segment_durations)]
+        for i, (clip, seg_dur) in enumerate(zip(clip_sequence, segment_durations)):
             out = INPUT / f"trim{i+1:02d}.mp4"
             clip_dur = get_video_duration(clip)
             if clip_dur < seg_dur:
                 loop_count = int(seg_dur / clip_dur) + 1
-                run(["ffmpeg", "-y", "-stream_loop", str(loop_count), "-i", str(clip),
-                     "-t", str(seg_dur), "-c", "copy", str(out)])
+                run([
+                    "ffmpeg", "-y", "-stream_loop", str(loop_count), "-i", str(clip),
+                    "-t", str(seg_dur), "-c", "copy", str(out)
+                ])
             else:
                 run(["ffmpeg", "-y", "-i", str(clip), "-t", str(seg_dur), "-c", "copy", str(out)])
             trimmed_clips.append(out)
+
         local_clips = trimmed_clips
         durations = segment_durations
 
-    # Concat
     list_file = TMP / "list.txt"
     list_file.write_text("\n".join([f"file '{c}'" for c in local_clips]), encoding="utf-8")
     run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", str(MERGED)])
 
-    # Hard cap
     raw_merged_duration = get_video_duration(MERGED)
     log(f"Merged: {raw_merged_duration:.1f}s | Cap: {MAX_OUTPUT_DURATION}s")
+
     if raw_merged_duration > MAX_OUTPUT_DURATION:
-        run(["ffmpeg", "-y", "-i", str(MERGED), "-t", str(MAX_OUTPUT_DURATION),
-             "-c", "copy", str(MERGED_CAPPED)])
+        run(["ffmpeg", "-y", "-i", str(MERGED), "-t", str(MAX_OUTPUT_DURATION), "-c", "copy", str(MERGED_CAPPED)])
         merged_input = MERGED_CAPPED
     else:
         merged_input = MERGED
+
     merged_duration = min(raw_merged_duration, MAX_OUTPUT_DURATION)
     log(f"Final duration: {merged_duration:.1f}s")
 
-    # Final render
     cap_hash = hashlib.sha256((caption + vibe + str(speed) + transition).encode()).hexdigest()[:8]
     final_path = OUTPUT / f"final_{cap_hash}.mp4"
     safe_caption = ffmpeg_escape(caption)
     vibe_filter = get_vibe_filters(vibe)
+
     fade_in_end = caption_fade_in + 0.5
     fade_out_start = max(fade_in_end + 0.5, merged_duration - caption_fade_out - 0.5)
     alpha_expr = (
@@ -556,12 +607,14 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
         f"if(lt(t,{fade_out_start}),1,"
         f"if(lt(t,{fade_out_start+0.5}),({fade_out_start+0.5}-t)/0.5,0))))"
     )
+
     drawtext = (
         f"drawtext=text='{safe_caption}':"
         f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
         f"fontcolor=white:fontsize=54:x=(w-text_w)/2:y=(h-text_h)/2:"
         f"box=1:boxcolor=black@0.72:boxborderw=40:alpha='{alpha_expr}'"
     )
+
     kb_filter = ",scale=iw*1.05:ih*1.05,crop=iw/1.05:ih/1.05" if ken_burns else ""
     vf = (
         f"scale=1080:1920:force_original_aspect_ratio=decrease,"
@@ -572,30 +625,50 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
         log(f"Mixing music: {music_path.name}")
         music_trimmed = TMP / "music_trimmed.wav"
         music_dur = music_analysis["duration"] if music_analysis else 999
+
         if music_dur < merged_duration:
             loop_count = int(merged_duration / music_dur) + 1
-            run(["ffmpeg", "-y", "-stream_loop", str(loop_count), "-i", str(music_path),
-                 "-t", str(merged_duration),
-                 "-af", f"afade=t=out:st={merged_duration - 2}:d=2", str(music_trimmed)])
+            run([
+                "ffmpeg", "-y", "-stream_loop", str(loop_count), "-i", str(music_path),
+                "-t", str(merged_duration),
+                "-af", f"afade=t=out:st={merged_duration - 2}:d=2",
+                str(music_trimmed)
+            ])
         else:
-            run(["ffmpeg", "-y", "-i", str(music_path), "-t", str(merged_duration),
-                 "-af", f"afade=t=out:st={merged_duration - 2}:d=2", str(music_trimmed)])
-        run(["ffmpeg", "-y",
-             "-i", str(merged_input), "-i", str(music_trimmed),
-             "-t", str(merged_duration),
-             "-filter_complex", f"[0:v]{vf}[vout];[1:a]volume=0.85,afade=t=in:st=0:d=1[aout]",
-             "-map", "[vout]", "-map", "[aout]",
-             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-             "-c:a", "aac", "-b:a", "192k", str(final_path)])
+            run([
+                "ffmpeg", "-y", "-i", str(music_path), "-t", str(merged_duration),
+                "-af", f"afade=t=out:st={merged_duration - 2}:d=2",
+                str(music_trimmed)
+            ])
+
+        run([
+            "ffmpeg", "-y",
+            "-i", str(merged_input),
+            "-i", str(music_trimmed),
+            "-t", str(merged_duration),
+            "-filter_complex", f"[0:v]{vf}[vout];[1:a]volume=0.85,afade=t=in:st=0:d=1[aout]",
+            "-map", "[vout]",
+            "-map", "[aout]",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:a", "aac", "-b:a", "192k",
+            str(final_path)
+        ])
     else:
-        run(["ffmpeg", "-y", "-i", str(merged_input), "-t", str(merged_duration),
-             "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-             "-an", str(final_path)])
+        run([
+            "ffmpeg", "-y",
+            "-i", str(merged_input),
+            "-t", str(merged_duration),
+            "-vf", vf,
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-an",
+            str(final_path)
+        ])
 
     actual = get_video_duration(final_path)
     log(f"Verified duration: {actual:.1f}s")
     if actual > MAX_OUTPUT_DURATION + 1:
         raise RuntimeError(f"Output {actual:.1f}s exceeds {MAX_OUTPUT_DURATION}s cap!")
+
     return final_path
 
 
@@ -626,22 +699,27 @@ def run_pipeline(selected_files, caption, speed=1.0, vibe="normal",
                 music_file_obj, cut_style, transition,
                 caption_fade_in, caption_fade_out, ken_burns
             )
+
             uploaded = upload_output(final_path)
             drive_file_id = uploaded.get("id")
             drive_file_name = uploaded.get("name")
             music_name = music_file_obj["name"] if music_file_obj else ""
+
             gen_id = db_insert_generation(
                 caption, vibe, music_name, cut_style, transition, speed,
                 drive_file_id, drive_file_name, file_hash
             )
+
             time.sleep(3)
             thumb = get_drive_thumb(drive_file_id)
             if thumb:
                 db_update_thumb(gen_id, thumb)
+
             archive_clips(selected_files)
             log(f"Done! Generation #{gen_id} awaiting approval.")
             pipeline_status["done"] = True
             pipeline_status["gen_id"] = gen_id
+
         except Exception as e:
             log(f"Error: {e}")
             log(traceback.format_exc())
@@ -721,7 +799,6 @@ section { margin-bottom: 32px; }
 .refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
 .no-music-btn { background: none; border: 1px dashed var(--border); border-radius: var(--radius); color: var(--muted); font-family: 'DM Mono', monospace; font-size: .75rem; padding: 10px 18px; cursor: pointer; width: 100%; text-align: left; transition: border-color .15s; }
 .no-music-btn:hover, .no-music-btn.selected { border-color: var(--accent); color: var(--accent); }
-/* Generations */
 .gen-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; }
 .gen-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; display: flex; flex-direction: column; transition: border-color .15s; }
 .gen-card:hover { border-color: var(--border); }
@@ -753,7 +830,6 @@ section { margin-bottom: 32px; }
   </header>
 
   <div class="layout">
-    <!-- Generator -->
     <div>
       <section>
         <div class="section-header">
@@ -762,6 +838,7 @@ section { margin-bottom: 32px; }
         </div>
         <div id="clip-list"><div class="empty">Loading clips...</div></div>
       </section>
+
       <section>
         <div class="section-header">
           <div class="section-label">Music</div>
@@ -769,6 +846,7 @@ section { margin-bottom: 32px; }
         </div>
         <div id="music-list"><div class="empty">Loading music...</div></div>
       </section>
+
       <section>
         <div class="section-label">Title / Caption</div>
         <div class="caption-wrap">
@@ -776,6 +854,7 @@ section { margin-bottom: 32px; }
           <span class="char-count" id="char-count">0 / 60</span>
         </div>
       </section>
+
       <section>
         <div class="section-label">AI Director</div>
         <input id="ai-prompt" type="text" placeholder='e.g. "hype reel, fast cuts"'>
@@ -788,13 +867,13 @@ section { margin-bottom: 32px; }
           </button>
         </div>
       </section>
+
       <div id="log-wrap">
         <div class="section-label" style="margin-bottom:14px;">Pipeline Log</div>
         <div id="log"></div>
       </div>
     </div>
 
-    <!-- Generations -->
     <div>
       <section>
         <div class="section-header">
@@ -809,212 +888,428 @@ section { margin-bottom: 32px; }
 
 <script>
 var MAX_CHARS = 60;
-var allFiles = [], allMusic = [], dragSrc = null, selectedMusicId = null;
-var aiSettings = { caption:"", speed:1.0, vibe:"normal", cut_style:"every_downbeat", transition:"cut", caption_fade_in:0.5, caption_fade_out:1.0, ken_burns:false };
+var allFiles = [];
+var allMusic = [];
+var dragSrc = null;
+var selectedMusicId = null;
+var aiSettings = {
+  caption: "",
+  speed: 1.0,
+  vibe: "normal",
+  cut_style: "every_downbeat",
+  transition: "cut",
+  caption_fade_in: 0.5,
+  caption_fade_out: 1.0,
+  ken_burns: false
+};
 
 function loadClips() {
   var list = document.getElementById("clip-list");
   list.innerHTML = "<div class='empty'>Fetching from Drive...</div>";
-  fetch("/api/clips").then(function(r){return r.json();}).then(function(data){
-    allFiles = data.files||[]; renderClips(); updateRunBtn();
-  }).catch(function(){list.innerHTML="<div class='empty'>Failed to load clips.</div>";});
+  fetch("/api/clips")
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      allFiles = data.files || [];
+      renderClips();
+      updateRunBtn();
+    })
+    .catch(function() {
+      list.innerHTML = "<div class='empty'>Failed to load clips.</div>";
+    });
 }
 
 function renderClips() {
   var list = document.getElementById("clip-list");
-  if (!allFiles.length){list.innerHTML="<div class='empty'>No video files found.</div>";return;}
-  list.innerHTML="";
-  allFiles.forEach(function(f){
-    var el=document.createElement("div"); el.className="clip-item"; el.draggable=true; el.dataset.id=f.id;
-    var mb=f.size?(parseInt(f.size)/1048576).toFixed(1)+" MB":"";
-    var thumb=f.thumbnailLink?"<img class='thumb' src='"+f.thumbnailLink+"'>":"<div class='thumb'></div>";
-    el.innerHTML="<span class='drag-handle'>::</span>"+thumb+"<input type='checkbox' class='clip-check' checked><span class='clip-name'>"+f.name+"</span><span class='clip-meta'>"+mb+"</span>";
-    el.querySelector(".clip-check").addEventListener("change",function(){el.classList.toggle("unselected",!this.checked);updateRunBtn();});
-    el.addEventListener("dragstart",function(e){dragSrc=el;el.classList.add("dragging");e.dataTransfer.effectAllowed="move";});
-    el.addEventListener("dragover",function(e){e.preventDefault();document.querySelectorAll(".clip-item").forEach(function(x){x.classList.remove("drag-over");});el.classList.add("drag-over");});
-    el.addEventListener("drop",function(e){e.preventDefault();if(dragSrc===el)return;var items=Array.from(list.querySelectorAll(".clip-item"));var si=items.indexOf(dragSrc),ti=items.indexOf(el);if(si<ti)list.insertBefore(dragSrc,el.nextSibling);else list.insertBefore(dragSrc,el);syncOrder();});
-    el.addEventListener("dragend",function(){document.querySelectorAll(".clip-item").forEach(function(x){x.classList.remove("dragging","drag-over");});});
+  if (!allFiles.length) {
+    list.innerHTML = "<div class='empty'>No video files found.</div>";
+    return;
+  }
+
+  list.innerHTML = "";
+  allFiles.forEach(function(f) {
+    var el = document.createElement("div");
+    el.className = "clip-item";
+    el.draggable = true;
+    el.dataset.id = f.id;
+
+    var mb = f.size ? (parseInt(f.size, 10) / 1048576).toFixed(1) + " MB" : "";
+    var thumb = f.thumbnailLink
+      ? "<img class='thumb' src='" + f.thumbnailLink + "'>"
+      : "<div class='thumb'></div>";
+
+    el.innerHTML =
+      "<span class='drag-handle'>::</span>" +
+      thumb +
+      "<input type='checkbox' class='clip-check' checked>" +
+      "<span class='clip-name'>" + f.name + "</span>" +
+      "<span class='clip-meta'>" + mb + "</span>";
+
+    el.querySelector(".clip-check").addEventListener("change", function() {
+      el.classList.toggle("unselected", !this.checked);
+      updateRunBtn();
+    });
+
+    el.addEventListener("dragstart", function(e) {
+      dragSrc = el;
+      el.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+    });
+
+    el.addEventListener("dragover", function(e) {
+      e.preventDefault();
+      document.querySelectorAll(".clip-item").forEach(function(x) {
+        x.classList.remove("drag-over");
+      });
+      el.classList.add("drag-over");
+    });
+
+    el.addEventListener("drop", function(e) {
+      e.preventDefault();
+      if (dragSrc === el) return;
+      var items = Array.from(list.querySelectorAll(".clip-item"));
+      var si = items.indexOf(dragSrc);
+      var ti = items.indexOf(el);
+      if (si < ti) list.insertBefore(dragSrc, el.nextSibling);
+      else list.insertBefore(dragSrc, el);
+      syncOrder();
+    });
+
+    el.addEventListener("dragend", function() {
+      document.querySelectorAll(".clip-item").forEach(function(x) {
+        x.classList.remove("dragging", "drag-over");
+      });
+    });
+
     list.appendChild(el);
   });
 }
 
 function loadMusic() {
-  fetch("/api/music").then(function(r){return r.json();}).then(function(data){allMusic=data.files||[];renderMusic();});
+  fetch("/api/music")
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      allMusic = data.files || [];
+      renderMusic();
+    })
+    .catch(function() {
+      var list = document.getElementById("music-list");
+      list.innerHTML = "<div class='empty'>Failed to load music.</div>";
+    });
 }
 
 function renderMusic() {
-  var list=document.getElementById("music-list"); list.innerHTML="";
-  var noMusic=document.createElement("button");
-  noMusic.className="no-music-btn"+(selectedMusicId===null?" selected":"");
-  noMusic.textContent="No music (video only)";
-  noMusic.addEventListener("click",function(){selectedMusicId=null;renderMusic();});
+  var list = document.getElementById("music-list");
+  list.innerHTML = "";
+
+  var noMusic = document.createElement("button");
+  noMusic.className = "no-music-btn" + (selectedMusicId === null ? " selected" : "");
+  noMusic.textContent = "No music (video only)";
+  noMusic.addEventListener("click", function() {
+    selectedMusicId = null;
+    renderMusic();
+  });
   list.appendChild(noMusic);
-  if(!allMusic.length){var em=document.createElement("div");em.className="empty";em.textContent="No music files found.";list.appendChild(em);return;}
-  allMusic.forEach(function(f){
-    var el=document.createElement("div"); el.className="music-item"+(selectedMusicId===f.id?" selected":""); el.dataset.id=f.id;
-    var mb=f.size?(parseInt(f.size)/1048576).toFixed(1)+" MB":"";
-    el.innerHTML="<div class='music-icon'>~</div><span class='music-name'>"+f.name+"</span><span class='clip-meta'>"+mb+"</span>";
-    el.addEventListener("click",function(){selectedMusicId=f.id;renderMusic();});
+
+  if (!allMusic.length) {
+    var em = document.createElement("div");
+    em.className = "empty";
+    em.textContent = "No music files found.";
+    list.appendChild(em);
+    return;
+  }
+
+  allMusic.forEach(function(f) {
+    var el = document.createElement("div");
+    el.className = "music-item" + (selectedMusicId === f.id ? " selected" : "");
+    el.dataset.id = f.id;
+
+    var mb = f.size ? (parseInt(f.size, 10) / 1048576).toFixed(1) + " MB" : "";
+    el.innerHTML =
+      "<div class='music-icon'>~</div>" +
+      "<span class='music-name'>" + f.name + "</span>" +
+      "<span class='clip-meta'>" + mb + "</span>";
+
+    el.addEventListener("click", function() {
+      selectedMusicId = f.id;
+      renderMusic();
+    });
+
     list.appendChild(el);
   });
 }
 
 function loadGenerations() {
-  fetch("/api/generations").then(function(r){return r.json();}).then(function(data){renderGenerations(data.generations||[]);});
+  fetch("/api/generations")
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      renderGenerations(data.generations || []);
+    })
+    .catch(function() {
+      var grid = document.getElementById("gen-grid");
+      grid.innerHTML = "<div class='empty'>Failed to load generations.</div>";
+    });
 }
 
 function statusLabel(s) {
-  return {awaiting_approval:"⏳ Awaiting Approval",approved:"✅ Approved",posting:"📤 Posting...",posted:"🎉 Posted",post_error:"❌ Post Error"}[s]||s;
+  return {
+    awaiting_approval: "⏳ Awaiting Approval",
+    approved: "✅ Approved",
+    posting: "📤 Posting...",
+    posted: "🎉 Posted",
+    post_error: "❌ Post Error"
+  }[s] || s;
 }
 
 function renderGenerations(gens) {
-  var grid=document.getElementById("gen-grid");
-  if(!gens.length){grid.innerHTML="<div class='empty'>No generations yet.</div>";return;}
-  grid.innerHTML="";
-  gens.forEach(function(g){
-    var card=document.createElement("div"); card.className="gen-card"; card.dataset.id=g.id;
+  var grid = document.getElementById("gen-grid");
+  if (!gens.length) {
+    grid.innerHTML = "<div class='empty'>No generations yet.</div>";
+    return;
+  }
+
+  grid.innerHTML = "";
+
+  gens.forEach(function(g) {
+    var card = document.createElement("div");
+    card.className = "gen-card";
+    card.dataset.id = g.id;
+
     var thumbHtml;
     if (g.drive_thumb_url) {
-      var thumbHtml;
-if (g.drive_thumb_url) {
-  thumbHtml = `<img class="gen-thumb" src="${g.drive_thumb_url}" onerror="this.outerHTML='<div class=&quot;gen-thumb-placeholder&quot;>🎬</div>'">`;
-} else {
-  thumbHtml = `<div class="gen-thumb-placeholder">🎬</div>`;
-}
-    var date=new Date(g.created_at+"Z").toLocaleString();
-    var metaParts=[];
-    if(g.vibe)metaParts.push("Vibe: "+g.vibe);
-    if(g.music)metaParts.push(g.music);
-    if(g.cut_style)metaParts.push(g.cut_style);
-    if(g.speed)metaParts.push(g.speed+"x");
-    var actionsHtml="";
-    if(g.status==="awaiting_approval")
-      actionsHtml="<div class='gen-actions'><button class='approve-btn' onclick='approveGen("+g.id+")'>✓ Approve</button></div>";
-    else if(g.status==="approved")
-      actionsHtml="<div class='gen-actions'><button class='post-btn' onclick='postGen("+g.id+")'>🚀 Post Now</button></div>";
-    else if(g.status==="post_error")
-      actionsHtml="<div class='gen-actions'><button class='post-btn' onclick='postGen("+g.id+")'>🔁 Retry</button></div>";
-    card.innerHTML=thumbHtml+
-      "<div class='gen-body'>"+
-        "<div class='gen-caption'>"+(g.caption||"")+"</div>"+
-        "<span class='gen-status status-"+g.status+"'>"+statusLabel(g.status)+"</span>"+
-        "<div class='gen-meta'>"+metaParts.join(" &bull; ")+"</div>"+
-        (g.post_error?"<div class='gen-error'>"+g.post_error+"</div>":"")+
-        "<div class='gen-date'>"+date+"</div>"+
-        actionsHtml+
+      thumbHtml = '<img class="gen-thumb" src="' + g.drive_thumb_url + '">';
+    } else {
+      thumbHtml = '<div class="gen-thumb-placeholder">🎬</div>';
+    }
+
+    var date = new Date(g.created_at + "Z").toLocaleString();
+    var metaParts = [];
+    if (g.vibe) metaParts.push("Vibe: " + g.vibe);
+    if (g.music) metaParts.push(g.music);
+    if (g.cut_style) metaParts.push(g.cut_style);
+    if (g.speed) metaParts.push(g.speed + "x");
+
+    var actionsHtml = "";
+    if (g.status === "awaiting_approval") {
+      actionsHtml = "<div class='gen-actions'><button class='approve-btn' onclick='approveGen(" + g.id + ")'>✓ Approve</button></div>";
+    } else if (g.status === "approved") {
+      actionsHtml = "<div class='gen-actions'><button class='post-btn' onclick='postGen(" + g.id + ")'>🚀 Post Now</button></div>";
+    } else if (g.status === "post_error") {
+      actionsHtml = "<div class='gen-actions'><button class='post-btn' onclick='postGen(" + g.id + ")'>🔁 Retry</button></div>";
+    }
+
+    card.innerHTML =
+      thumbHtml +
+      "<div class='gen-body'>" +
+        "<div class='gen-caption'>" + (g.caption || "") + "</div>" +
+        "<span class='gen-status status-" + g.status + "'>" + statusLabel(g.status) + "</span>" +
+        "<div class='gen-meta'>" + metaParts.join(" &bull; ") + "</div>" +
+        (g.post_error ? "<div class='gen-error'>" + g.post_error + "</div>" : "") +
+        "<div class='gen-date'>" + date + "</div>" +
+        actionsHtml +
       "</div>";
+
     grid.appendChild(card);
+
+    var img = card.querySelector(".gen-thumb");
+    if (img) {
+      img.onerror = function() {
+        this.outerHTML = '<div class="gen-thumb-placeholder">🎬</div>';
+      };
+    }
   });
 }
 
 function approveGen(id) {
-  fetch("/api/generations/"+id+"/approve",{method:"POST"})
-    .then(function(r){return r.json();})
-    .then(function(data){if(data.ok)loadGenerations();else alert("Error: "+data.error);});
+  fetch("/api/generations/" + id + "/approve", { method: "POST" })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.ok) loadGenerations();
+      else alert("Error: " + data.error);
+    });
 }
 
 function postGen(id) {
-  if(!confirm("Post to TikTok + Instagram now?"))return;
-  var card=document.querySelector(".gen-card[data-id='"+id+"']");
-  if(card){var a=card.querySelector(".gen-actions");if(a)a.innerHTML="<span style='color:var(--success);font-family:monospace;font-size:.8rem'>Posting...</span>";}
-  fetch("/api/generations/"+id+"/post",{method:"POST"})
-    .then(function(r){return r.json();})
-    .then(function(data){setTimeout(loadGenerations,2000);if(data.error)alert("Error: "+data.error);});
+  if (!confirm("Post to TikTok + Instagram now?")) return;
+
+  var card = document.querySelector(".gen-card[data-id='" + id + "']");
+  if (card) {
+    var a = card.querySelector(".gen-actions");
+    if (a) {
+      a.innerHTML = "<span style='color:var(--success);font-family:monospace;font-size:.8rem'>Posting...</span>";
+    }
+  }
+
+  fetch("/api/generations/" + id + "/post", { method: "POST" })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      setTimeout(loadGenerations, 2000);
+      if (data.error) alert("Error: " + data.error);
+    });
 }
 
 function syncOrder() {
-  var ids=Array.from(document.querySelectorAll(".clip-item")).map(function(el){return el.dataset.id;});
-  allFiles=ids.map(function(id){return allFiles.find(function(f){return f.id===id;});});
+  var ids = Array.from(document.querySelectorAll(".clip-item")).map(function(el) {
+    return el.dataset.id;
+  });
+  allFiles = ids.map(function(id) {
+    return allFiles.find(function(f) { return f.id === id; });
+  });
 }
 
 function updateRunBtn() {
-  var caption=document.getElementById("caption").value.trim();
-  var selected=getSelectedFiles();
-  document.getElementById("run-btn").disabled=!caption||caption.length>MAX_CHARS||selected.length===0;
+  var caption = document.getElementById("caption").value.trim();
+  var selected = getSelectedFiles();
+  document.getElementById("run-btn").disabled = !caption || caption.length > MAX_CHARS || selected.length === 0;
 }
 
 function getSelectedFiles() {
   return Array.from(document.querySelectorAll(".clip-item"))
-    .filter(function(el){return el.querySelector(".clip-check").checked;})
-    .map(function(el){return allFiles.find(function(f){return f.id===el.dataset.id;});})
+    .filter(function(el) { return el.querySelector(".clip-check").checked; })
+    .map(function(el) { return allFiles.find(function(f) { return f.id === el.dataset.id; }); })
     .filter(Boolean);
 }
 
 function getSelectedMusic() {
-  if(!selectedMusicId)return null;
-  return allMusic.find(function(f){return f.id===selectedMusicId;})||null;
+  if (!selectedMusicId) return null;
+  return allMusic.find(function(f) { return f.id === selectedMusicId; }) || null;
 }
 
 function askAI() {
-  var prompt=document.getElementById("ai-prompt").value.trim(); if(!prompt)return;
-  var btn=document.getElementById("ask-ai-btn"); btn.disabled=true; btn.textContent="Thinking...";
-  fetch("/api/ai-plan",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({prompt:prompt,clip_names:getSelectedFiles().map(function(f){return f.name;})})})
-    .then(function(r){return r.json();})
-    .then(function(data){
-      btn.disabled=false; btn.textContent="Ask AI";
-      if(data.error){alert("AI error: "+data.error);return;}
-      aiSettings={caption:data.caption,speed:data.speed,vibe:data.vibe,
-        cut_style:data.cut_style||"every_downbeat",transition:data.transition||"cut",
-        caption_fade_in:data.caption_fade_in||0.5,caption_fade_out:data.caption_fade_out||1.0,
-        ken_burns:data.ken_burns||false};
-      document.getElementById("caption").value=data.caption; updateRunBtn();
-      if(data.music_file){var match=allMusic.find(function(f){return f.name===data.music_file;});if(match){selectedMusicId=match.id;renderMusic();}}
-      document.getElementById("ai-plan-text").innerHTML=
-        "<b>Caption:</b> "+data.caption+"<br><b>Music:</b> "+(data.music_file||"none")+
-        "<br><b>Cut:</b> "+aiSettings.cut_style+" &bull; <b>Transition:</b> "+aiSettings.transition+
-        "<br><b>Vibe:</b> "+data.vibe+" &bull; <b>Speed:</b> "+data.speed+"x &bull; <b>Ken Burns:</b> "+(data.ken_burns?"yes":"no")+
-        "<br><b>Reasoning:</b> "+data.explanation;
-      document.getElementById("ai-plan").style.display="block";
+  var prompt = document.getElementById("ai-prompt").value.trim();
+  if (!prompt) return;
+
+  var btn = document.getElementById("ask-ai-btn");
+  btn.disabled = true;
+  btn.textContent = "Thinking...";
+
+  fetch("/api/ai-plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      prompt: prompt,
+      clip_names: getSelectedFiles().map(function(f) { return f.name; })
     })
-    .catch(function(){btn.disabled=false;btn.textContent="Ask AI";alert("Failed to reach AI.");});
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      btn.disabled = false;
+      btn.textContent = "Ask AI";
+
+      if (data.error) {
+        alert("AI error: " + data.error);
+        return;
+      }
+
+      aiSettings = {
+        caption: data.caption,
+        speed: data.speed,
+        vibe: data.vibe,
+        cut_style: data.cut_style || "every_downbeat",
+        transition: data.transition || "cut",
+        caption_fade_in: data.caption_fade_in || 0.5,
+        caption_fade_out: data.caption_fade_out || 1.0,
+        ken_burns: data.ken_burns || false
+      };
+
+      document.getElementById("caption").value = data.caption;
+      updateRunBtn();
+
+      if (data.music_file) {
+        var match = allMusic.find(function(f) { return f.name === data.music_file; });
+        if (match) {
+          selectedMusicId = match.id;
+          renderMusic();
+        }
+      }
+
+      document.getElementById("ai-plan-text").innerHTML =
+        "<b>Caption:</b> " + data.caption +
+        "<br><b>Music:</b> " + (data.music_file || "none") +
+        "<br><b>Cut:</b> " + aiSettings.cut_style + " &bull; <b>Transition:</b> " + aiSettings.transition +
+        "<br><b>Vibe:</b> " + data.vibe + " &bull; <b>Speed:</b> " + data.speed + "x &bull; <b>Ken Burns:</b> " + (data.ken_burns ? "yes" : "no") +
+        "<br><b>Reasoning:</b> " + data.explanation;
+
+      document.getElementById("ai-plan").style.display = "block";
+    })
+    .catch(function() {
+      btn.disabled = false;
+      btn.textContent = "Ask AI";
+      alert("Failed to reach AI.");
+    });
 }
 
 function runPipeline() {
-  var caption=document.getElementById("caption").value.trim();
-  var selected=getSelectedFiles(); var music=getSelectedMusic();
-  document.getElementById("run-btn").disabled=true;
-  document.getElementById("spinner").style.display="block";
-  document.getElementById("btn-label").textContent="Running...";
-  document.getElementById("log-wrap").style.display="block";
-  document.getElementById("log").textContent="";
-  fetch("/api/run",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({files:selected,caption:caption,music_file:music,
-      speed:aiSettings.speed,vibe:aiSettings.vibe,cut_style:aiSettings.cut_style,
-      transition:aiSettings.transition,caption_fade_in:aiSettings.caption_fade_in,
-      caption_fade_out:aiSettings.caption_fade_out,ken_burns:aiSettings.ken_burns})
-  }).then(function(){pollLog();});
+  var caption = document.getElementById("caption").value.trim();
+  var selected = getSelectedFiles();
+  var music = getSelectedMusic();
+
+  document.getElementById("run-btn").disabled = true;
+  document.getElementById("spinner").style.display = "block";
+  document.getElementById("btn-label").textContent = "Running...";
+  document.getElementById("log-wrap").style.display = "block";
+  document.getElementById("log").textContent = "";
+
+  fetch("/api/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      files: selected,
+      caption: caption,
+      music_file: music,
+      speed: aiSettings.speed,
+      vibe: aiSettings.vibe,
+      cut_style: aiSettings.cut_style,
+      transition: aiSettings.transition,
+      caption_fade_in: aiSettings.caption_fade_in,
+      caption_fade_out: aiSettings.caption_fade_out,
+      ken_burns: aiSettings.ken_burns
+    })
+  }).then(function() {
+    pollLog();
+  });
 }
 
 function pollLog() {
-  var logEl=document.getElementById("log");
-  var interval=setInterval(function(){
-    fetch("/api/status").then(function(r){return r.json();}).then(function(data){
-      logEl.textContent=data.log.join(String.fromCharCode(10)); logEl.scrollTop=logEl.scrollHeight;
-      if(!data.running){
-        clearInterval(interval);
-        document.getElementById("spinner").style.display="none";
-        document.getElementById("run-btn").disabled=false;
-        document.getElementById("btn-label").textContent=data.done?"Done - Run Again":"Run Pipeline";
-        if(data.done)setTimeout(loadGenerations,1500);
-      }
-    });
-  },1000);
+  var logEl = document.getElementById("log");
+  var interval = setInterval(function() {
+    fetch("/api/status")
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        logEl.textContent = data.log.join(String.fromCharCode(10));
+        logEl.scrollTop = logEl.scrollHeight;
+
+        if (!data.running) {
+          clearInterval(interval);
+          document.getElementById("spinner").style.display = "none";
+          document.getElementById("run-btn").disabled = false;
+          document.getElementById("btn-label").textContent = data.done ? "Done - Run Again" : "Run Pipeline";
+          if (data.done) setTimeout(loadGenerations, 1500);
+        }
+      });
+  }, 1000);
 }
 
-document.getElementById("caption").addEventListener("input",function(){
-  var val=this.value; var count=document.getElementById("char-count");
-  count.textContent=val.length+" / 60"; count.classList.toggle("warn",val.length>MAX_CHARS);
-  this.classList.toggle("too-long",val.length>MAX_CHARS); updateRunBtn();
+document.getElementById("caption").addEventListener("input", function() {
+  var val = this.value;
+  var count = document.getElementById("char-count");
+  count.textContent = val.length + " / 60";
+  count.classList.toggle("warn", val.length > MAX_CHARS);
+  this.classList.toggle("too-long", val.length > MAX_CHARS);
+  updateRunBtn();
 });
-document.getElementById("refresh-btn").addEventListener("click",loadClips);
-document.getElementById("refresh-music-btn").addEventListener("click",loadMusic);
-document.getElementById("refresh-gens-btn").addEventListener("click",loadGenerations);
-document.getElementById("run-btn").addEventListener("click",runPipeline);
-document.getElementById("ask-ai-btn").addEventListener("click",askAI);
-document.getElementById("ai-prompt").addEventListener("keydown",function(e){if(e.key==="Enter")askAI();});
 
-loadClips(); loadMusic(); loadGenerations();
+document.getElementById("refresh-btn").addEventListener("click", loadClips);
+document.getElementById("refresh-music-btn").addEventListener("click", loadMusic);
+document.getElementById("refresh-gens-btn").addEventListener("click", loadGenerations);
+document.getElementById("run-btn").addEventListener("click", runPipeline);
+document.getElementById("ask-ai-btn").addEventListener("click", askAI);
+document.getElementById("ai-prompt").addEventListener("keydown", function(e) {
+  if (e.key === "Enter") askAI();
+});
+
+loadClips();
+loadMusic();
+loadGenerations();
 setInterval(loadGenerations, 30000);
 </script>
 </body>
@@ -1077,7 +1372,8 @@ def api_run():
     thread = threading.Thread(
         target=run_pipeline,
         args=(
-            selected_files, caption,
+            selected_files,
+            caption,
             float(data.get("speed") or 1.0),
             data.get("vibe") or "normal",
             data.get("music_file"),
