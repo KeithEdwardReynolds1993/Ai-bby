@@ -304,11 +304,18 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
 
     service = drive()
 
-    # ── Download clips ──
+    # ── Download and transcode clips to H264 ──
     local_clips = []
     for i, f in enumerate(selected_files):
         target = INPUT / f"clip{i+1:02d}.mp4"
-        download_file(service, f, target)
+        raw = INPUT / f"raw{i+1:02d}.mp4"
+        download_file(service, f, raw)
+        if not target.exists():
+            log(f"Transcoding clip{i+1} to H264...")
+            run(["ffmpeg", "-y", "-i", str(raw),
+                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                 "-c:a", "aac", "-b:a", "128k",
+                 str(target)])
         local_clips.append(target)
 
     # ── Download music ──
