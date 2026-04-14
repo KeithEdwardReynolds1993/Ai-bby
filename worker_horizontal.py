@@ -23,7 +23,7 @@ INPUT = TMP / "input"
 OUTPUT = TMP / "output"
 
 SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
-INCOMING_FOLDER = os.getenv("GOOGLE_DRIVE_INCOMING_FOLDER_ID")
+INCOMING_FOLDER = os.getenv("GOOGLE_DRIVE_INTERVIEW_FOLDER_ID", os.getenv("GOOGLE_DRIVE_INCOMING_FOLDER_ID", ""))
 OUTPUT_FOLDER = os.getenv("GOOGLE_DRIVE_OUTPUT_FOLDER_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
@@ -255,7 +255,7 @@ def generate_fcpxml(video_file, segments, duration, width, height, orig_filename
 # PIPELINE
 # =============================================================================
 
-def run_pipeline():
+def run_pipeline(prompt=""):
     global pipeline_status
     with pipeline_lock:
         pipeline_status = {"running": True, "log": [], "done": False, "error": None}
@@ -263,6 +263,7 @@ def run_pipeline():
             ensure_dirs()
             clean_run_artifacts()
 
+            if prompt: plog(f"Director note: {prompt}")
             plog("Getting latest video from Drive...")
             video = get_latest_video()
             if not video:
@@ -352,7 +353,10 @@ h1{font-size:1.4rem;font-weight:900;color:#00a6ff;margin-bottom:2px}
     </div>
   </div>
 
-  <button id="go-btn">GENERATE XML</button>
+  <div style="position:relative;margin-bottom:10px">
+    <input id="prompt" style="width:100%;background:#0d0d0d;border:1px solid #1c1c1c;border-radius:10px;padding:13px 48px 13px 14px;font-size:.9rem;color:#fff;outline:none" placeholder="Director note e.g. find the most energetic moments...">
+    <button id="go-btn" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);width:32px;height:32px;background:#00a6ff;color:#000;border:none;border-radius:7px;font-weight:900;cursor:pointer;font-size:.9rem">&#9654;</button>
+  </div>
   <button id="refresh-btn">&#8635; Refresh Clip</button>
   <div id="log"></div>
 </div>
@@ -386,7 +390,8 @@ function go() {
   busy = true;
   document.getElementById("go-btn").disabled = true;
   setLog("Starting...", "active");
-  fetch("/api/run", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({})})
+  var prompt = document.getElementById("prompt").value.trim();
+  fetch("/api/run", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({prompt: prompt})})
     .then(function(r) { return r.json(); })
     .then(function(data) {
       if (data.error) { setLog("Error: " + data.error, "error"); busy = false; document.getElementById("go-btn").disabled = false; return; }
@@ -408,6 +413,7 @@ function pollLog() {
 }
 
 document.getElementById("go-btn").addEventListener("click", go);
+document.getElementById("prompt").addEventListener("keydown", function(e) { if (e.key === "Enter") go(); });
 document.getElementById("refresh-btn").addEventListener("click", loadLatestClip);
 loadLatestClip();
 </script>
@@ -437,7 +443,9 @@ def api_latest_clip():
 def api_run():
     if pipeline_status.get("running"):
         return jsonify({"error": "Already running"}), 409
-    threading.Thread(target=run_pipeline, daemon=True).start()
+    data = request.json or {}
+    prompt = data.get("prompt", "").strip()
+    threading.Thread(target=run_pipeline, args=(prompt,), daemon=True).start()
     return jsonify({"ok": True})
 
 
