@@ -1,10 +1,13 @@
 import os
+import io
 import json
 import subprocess
 import threading
 import traceback
 from pathlib import Path
 
+import cv2
+import numpy as np
 import requests
 from flask import Flask, request, jsonify
 from googleapiclient.discovery import build
@@ -16,33 +19,21 @@ app = Flask("worker")
 TMP = Path("/tmp/ai_bby")
 INPUT = TMP / "input"
 OUTPUT = TMP / "output"
-MUSIC_DIR = TMP / "music"
-MERGED = TMP / "merged.mp4"
-MERGED_CAPPED = TMP / "merged_capped.mp4"
 
 SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
 INCOMING_FOLDER = os.getenv("GOOGLE_DRIVE_INCOMING_FOLDER_ID")
 OUTPUT_FOLDER = os.getenv("GOOGLE_DRIVE_OUTPUT_FOLDER_ID")
-ARCHIVE_FOLDER = os.getenv("GOOGLE_DRIVE_ARCHIVE_FOLDER_ID")
-MUSIC_FOLDER = os.getenv("GOOGLE_DRIVE_MUSIC_FOLDER_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MAX_CAPTION_CHARS = int(os.getenv("MAX_CAPTION_CHARS") or "60")
-MAX_OUTPUT_DURATION = 30
+SEGMENT_DURATION = 15
 
 pipeline_status = {"running": False, "log": [], "done": False, "error": None}
 pipeline_lock = threading.Lock()
 
 
-def log(msg):
+def plog(msg):
     print(msg)
     pipeline_status["log"].append(str(msg))
-
-
-def safe_float(val, default=1.0):
-    try:
-        return float(str(val).replace("x", "").strip())
-    except Exception:
-        return default
 
 
 def drive():
@@ -56,26 +47,16 @@ def drive():
 def ensure_dirs():
     INPUT.mkdir(parents=True, exist_ok=True)
     OUTPUT.mkdir(parents=True, exist_ok=True)
-    MUSIC_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def clean_run_artifacts():
-    for p in [MERGED, MERGED_CAPPED]:
-        if p.exists():
-            p.unlink()
-    for f in INPUT.glob("*"):
-        if f.is_file():
-            f.unlink()
-    for f in OUTPUT.glob("*"):
-        if f.is_file():
-            f.unlink()
-    for f in MUSIC_DIR.glob("*"):
+    for f in list(INPUT.glob("*")) + list(OUTPUT.glob("*")):
         if f.is_file():
             f.unlink()
 
 
-def run(cmd):
-    log(">>> " + " ".join(str(c) for c in cmd))
+def run_cmd(cmd):
+    print(">>>", " ".join(str(c) for c in cmd))
     subprocess.run(cmd, check=True)
 
 
@@ -93,54 +74,30 @@ def ffmpeg_escape(text):
     )
 
 
-def get_video_duration(path):
-    result = subprocess.run(
+def get_duration(path):
+    r = subprocess.run(
         ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(path)],
-        capture_output=True,
-        text=True,
-        check=True
+        capture_output=True, text=True, check=True
     )
-    info = json.loads(result.stdout)
-    return float(info["format"]["duration"])
+    return float(json.loads(r.stdout)["format"]["duration"])
 
 
-def get_vibe_filters(vibe):
-    return {
-        "normal": "",
-        "hype": ",eq=contrast=1.25:brightness=0.04:saturation=1.35",
-        "cinematic": ",eq=contrast=1.08:brightness=-0.04:saturation=0.8",
-        "dreamy": ",gblur=sigma=1.2,eq=brightness=0.06:saturation=0.85",
-        "gritty": ",eq=contrast=1.35:brightness=-0.08:saturation=0.65",
-        "retro": ",eq=saturation=0.8"
-    }.get(vibe, "")
+# =============================================================================
+# DRIVE
+# =============================================================================
 
-
-def list_incoming_files():
+def get_latest_video():
     service = drive()
     results = service.files().list(
         q=f"'{INCOMING_FOLDER}' in parents and trashed=false",
-        fields="files(id,name,mimeType,size,thumbnailLink)",
+        fields="files(id,name,mimeType,size,thumbnailLink,modifiedTime)",
+        orderBy="modifiedTime desc",
         includeItemsFromAllDrives=True,
         supportsAllDrives=True,
         corpora="allDrives"
     ).execute()
-    files = results.get("files", [])
-    return [f for f in files if f.get("mimeType", "").startswith("video/")]
-
-
-def list_music_files():
-    if not MUSIC_FOLDER:
-        return []
-    service = drive()
-    results = service.files().list(
-        q=f"'{MUSIC_FOLDER}' in parents and trashed=false",
-        fields="files(id,name,mimeType,size)",
-        includeItemsFromAllDrives=True,
-        supportsAllDrives=True,
-        corpora="allDrives"
-    ).execute()
-    files = results.get("files", [])
-    return [f for f in files if f.get("mimeType", "").startswith(("audio/", "video/mp4"))]
+    files = [f for f in results.get("files", []) if f.get("mimeType", "").startswith("video/")]
+    return files[0] if files else None
 
 
 def download_file(service, file_obj, target):
@@ -150,7 +107,6 @@ def download_file(service, file_obj, target):
         done = False
         while not done:
             _, done = downloader.next_chunk()
-    log(f"Downloaded: {file_obj['name']}")
 
 
 def upload_output(final_path):
@@ -161,60 +117,145 @@ def upload_output(final_path):
         fields="id,name",
         supportsAllDrives=True
     ).execute()
-    log(f"Uploaded: {uploaded.get('name')} ({uploaded.get('id')})")
+    plog(f"Uploaded: {uploaded.get('name')} ({uploaded.get('id')})")
     return uploaded
 
 
-def archive_clips(selected_files):
-    if not ARCHIVE_FOLDER:
-        return
-    service = drive()
-    for f in selected_files:
-        try:
-            service.files().update(
-                fileId=f["id"],
-                addParents=ARCHIVE_FOLDER,
-                removeParents=INCOMING_FOLDER,
-                supportsAllDrives=True
-            ).execute()
-            log(f"Archived: {f['name']}")
-        except Exception as e:
-            log(f"Archive failed for {f['name']}: {e}")
+# =============================================================================
+# VISION ANALYSIS
+# =============================================================================
+
+def analyze_thumbnail(thumbnail_url):
+    if not thumbnail_url or not OPENAI_API_KEY:
+        return {}
+    try:
+        resp = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": "gpt-4o",
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Analyze this video thumbnail. Return ONLY JSON:\n"
+                                "- description: string (1-2 sentences)\n"
+                                "- mood: string (energetic/calm/funny/dramatic/inspirational)\n"
+                                "- subjects: list of strings\n"
+                                "- energy: string (low/medium/high)\n"
+                                "- setting: string (indoor/outdoor/studio/unknown)"
+                            )
+                        },
+                        {"type": "image_url", "image_url": {"url": thumbnail_url}}
+                    ]
+                }],
+                "max_tokens": 300
+            },
+            timeout=20
+        )
+        content = resp.json()["choices"][0]["message"]["content"].strip()
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+        return json.loads(content.strip())
+    except Exception as e:
+        plog(f"Vision analysis failed: {e}")
+        return {}
 
 
-def ask_openai(prompt, clip_names, music_files=None):
+# =============================================================================
+# OPTICAL FLOW + FACE DETECTION
+# =============================================================================
+
+def find_best_segment(video_path, total_duration):
+    if total_duration <= SEGMENT_DURATION:
+        return 0.0
+
+    cap = cv2.VideoCapture(str(video_path))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    sample_interval = max(1, int(fps * 0.5))
+    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+
+    frame_scores = []
+    prev_gray = None
+    frame_idx = 0
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        if frame_idx % sample_interval == 0:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            small = cv2.resize(gray, (320, 180))
+            motion = 0.0
+            if prev_gray is not None:
+                flow = cv2.calcOpticalFlowFarneback(prev_gray, small, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+                motion = float(np.mean(np.abs(flow)))
+            faces = face_cascade.detectMultiScale(small, 1.1, 4)
+            face_score = min(len(faces) * 0.4, 1.0)
+            frame_scores.append((frame_idx / fps, motion + face_score))
+            prev_gray = small
+        frame_idx += 1
+
+    cap.release()
+
+    if not frame_scores:
+        return 0.0
+
+    window = int(SEGMENT_DURATION / 0.5)
+    best_score = -1
+    best_start = 0.0
+
+    for i in range(max(1, len(frame_scores) - window + 1)):
+        score = sum(s for _, s in frame_scores[i:i + window])
+        if score > best_score:
+            best_score = score
+            best_start = frame_scores[i][0]
+
+    return min(best_start, total_duration - SEGMENT_DURATION)
+
+
+# =============================================================================
+# AI CAPTION
+# =============================================================================
+
+def generate_caption(prompt, vision):
     if not OPENAI_API_KEY:
-        raise ValueError("OPENAI_API_KEY is not set")
+        raise ValueError("OPENAI_API_KEY not set")
 
-    music_list = "\n".join([f["name"] for f in (music_files or [])]) or "No music available"
+    vision_summary = (
+        f"Description: {vision.get('description', 'unknown')}\n"
+        f"Mood: {vision.get('mood', 'unknown')}\n"
+        f"Energy: {vision.get('energy', 'unknown')}\n"
+        f"Setting: {vision.get('setting', 'unknown')}\n"
+        f"Subjects: {', '.join(vision.get('subjects', []))}"
+    )
 
     resp = requests.post(
         "https://api.openai.com/v1/chat/completions",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {OPENAI_API_KEY}"
-        },
+        headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
         json={
             "model": "gpt-4o",
             "messages": [
                 {
                     "role": "system",
                     "content": (
-                        "Return ONLY JSON with keys: "
-                        "caption, speed, vibe, music_file, cut_style, "
-                        "caption_fade_in, caption_fade_out, ken_burns, explanation."
+                        f"You write short punchy video captions. Max {MAX_CAPTION_CHARS} chars. "
+                        "Return ONLY JSON with key: caption"
                     )
                 },
                 {
                     "role": "user",
-                    "content": f"Clips: {', '.join(clip_names)}\nMusic:\n{music_list}\nPrompt: {prompt}"
+                    "content": f"Video analysis:\n{vision_summary}\n\nPrompt: {prompt}"
                 }
             ],
-            "temperature": 0.7
+            "temperature": 0.8
         },
-        timeout=30
+        timeout=20
     )
-
     if not resp.ok:
         raise ValueError(f"OpenAI error {resp.status_code}: {resp.text}")
 
@@ -223,426 +264,260 @@ def ask_openai(prompt, clip_names, music_files=None):
         content = content.split("```")[1]
         if content.startswith("json"):
             content = content[4:]
-    return json.loads(content.strip())
+    return json.loads(content.strip())["caption"]
 
 
-def build_video(selected_files, caption, speed=1.0, vibe="normal",
-                music_file_obj=None, cut_style="every_downbeat",
-                caption_fade_in=0.5, caption_fade_out=1.0,
-                ken_burns=False):
-    ensure_dirs()
-    clean_run_artifacts()
+# =============================================================================
+# PIPELINE
+# =============================================================================
 
-    if len(caption) > MAX_CAPTION_CHARS:
-        raise ValueError(f"Caption too long ({len(caption)} chars). Max {MAX_CAPTION_CHARS}.")
-
-    service = drive()
-    local_clips = []
-
-    for i, f in enumerate(selected_files):
-        raw = INPUT / f"raw{i+1:02d}.mp4"
-        target = INPUT / f"clip{i+1:02d}.mp4"
-        download_file(service, f, raw)
-
-        run([
-            "ffmpeg", "-y", "-i", str(raw),
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-c:a", "aac", "-b:a", "128k",
-            str(target)
-        ])
-        local_clips.append(target)
-
-    capped = []
-    for i, clip in enumerate(local_clips):
-        out = INPUT / f"capped{i+1:02d}.mp4"
-        run(["ffmpeg", "-y", "-i", str(clip), "-t", str(MAX_OUTPUT_DURATION), "-c", "copy", str(out)])
-        capped.append(out)
-    local_clips = capped
-
-    if abs(speed - 1.0) > 0.01:
-        sped = []
-        for i, clip in enumerate(local_clips):
-            out = INPUT / f"sped{i+1:02d}.mp4"
-            pts = round(1.0 / speed, 4)
-            run(["ffmpeg", "-y", "-i", str(clip), "-vf", f"setpts={pts}*PTS", "-an", str(out)])
-            sped.append(out)
-        local_clips = sped
-
-    list_file = TMP / "list.txt"
-    list_file.write_text("\n".join([f"file '{c}'" for c in local_clips]), encoding="utf-8")
-    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", str(MERGED)])
-
-    raw_merged_duration = get_video_duration(MERGED)
-    if raw_merged_duration > MAX_OUTPUT_DURATION:
-        run(["ffmpeg", "-y", "-i", str(MERGED), "-t", str(MAX_OUTPUT_DURATION), "-c", "copy", str(MERGED_CAPPED)])
-        merged_input = MERGED_CAPPED
-    else:
-        merged_input = MERGED
-
-    merged_duration = min(raw_merged_duration, MAX_OUTPUT_DURATION)
-    final_path = OUTPUT / "final.mp4"
-
-    music_path = None
-    if music_file_obj:
-        music_path = MUSIC_DIR / music_file_obj["name"]
-        download_file(service, music_file_obj, music_path)
-
-    safe_caption = ffmpeg_escape(caption)
-    vibe_filter = get_vibe_filters(vibe)
-    kb_filter = ",scale=iw*1.05:ih*1.05,crop=iw/1.05:ih/1.05" if ken_burns else ""
-
-    fade_in_end = caption_fade_in + 0.5
-    fade_out_start = max(fade_in_end + 0.5, merged_duration - caption_fade_out - 0.5)
-    alpha_expr = (
-        f"if(lt(t,{caption_fade_in}),0,"
-        f"if(lt(t,{fade_in_end}),(t-{caption_fade_in})/0.5,"
-        f"if(lt(t,{fade_out_start}),1,"
-        f"if(lt(t,{fade_out_start+0.5}),({fade_out_start+0.5}-t)/0.5,0))))"
-    )
-
-    vf = (
-        f"scale=1080:1920:force_original_aspect_ratio=decrease,"
-        f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black{kb_filter}{vibe_filter},"
-        f"drawtext=text='{safe_caption}':"
-        f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
-        f"fontcolor=white:fontsize=54:x=(w-text_w)/2:y=(h-text_h)/2:"
-        f"box=1:boxcolor=black@0.72:boxborderw=40:alpha='{alpha_expr}'"
-    )
-
-    if music_path and music_path.exists():
-        music_trimmed = TMP / "music_trimmed.wav"
-        run([
-            "ffmpeg", "-y", "-i", str(music_path), "-t", str(merged_duration),
-            "-af", f"afade=t=out:st={max(0, merged_duration - 2)}:d=2",
-            str(music_trimmed)
-        ])
-        run([
-            "ffmpeg", "-y",
-            "-i", str(merged_input),
-            "-i", str(music_trimmed),
-            "-t", str(merged_duration),
-            "-filter_complex", f"[0:v]{vf}[vout];[1:a]volume=0.85[aout]",
-            "-map", "[vout]",
-            "-map", "[aout]",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            "-c:a", "aac", "-b:a", "192k",
-            str(final_path)
-        ])
-    else:
-        run([
-            "ffmpeg", "-y",
-            "-i", str(merged_input),
-            "-t", str(merged_duration),
-            "-vf", vf,
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            "-an",
-            str(final_path)
-        ])
-
-    return final_path
-
-
-def run_pipeline(selected_files, caption, speed=1.0, vibe="normal",
-                 music_file_obj=None, cut_style="every_downbeat",
-                 caption_fade_in=0.5, caption_fade_out=1.0,
-                 ken_burns=False):
+def run_pipeline(prompt):
     global pipeline_status
-
     with pipeline_lock:
         pipeline_status = {"running": True, "log": [], "done": False, "error": None}
         try:
-            log("Starting pipeline...")
-            log(f"Caption: {caption} | Speed: {speed}x | Vibe: {vibe}")
+            ensure_dirs()
+            clean_run_artifacts()
 
-            final_path = build_video(
-                selected_files,
-                caption,
-                speed,
-                vibe,
-                music_file_obj,
-                cut_style,
-                caption_fade_in,
-                caption_fade_out,
-                ken_burns
+            plog("Getting latest video from Drive...")
+            video = get_latest_video()
+            if not video:
+                raise ValueError("No videos found in incoming folder.")
+            plog(f"Found: {video['name']}")
+
+            plog("Analyzing thumbnail...")
+            vision = analyze_thumbnail(video.get("thumbnailLink", ""))
+            if vision:
+                plog(f"Vision: {vision.get('description', '')}")
+                plog(f"Mood: {vision.get('mood', '')} | Energy: {vision.get('energy', '')}")
+
+            plog("Generating caption...")
+            caption = generate_caption(prompt, vision)
+            plog(f"Caption: {caption}")
+
+            plog("Downloading video...")
+            service = drive()
+            raw = INPUT / "raw_clip.mp4"
+            download_file(service, video, raw)
+
+            total_duration = get_duration(raw)
+            plog(f"Duration: {total_duration:.1f}s")
+
+            plog(f"Finding best {SEGMENT_DURATION}s segment...")
+            best_start = find_best_segment(raw, total_duration)
+            actual_seg = min(SEGMENT_DURATION, total_duration - best_start)
+            plog(f"Best segment: {best_start:.1f}s — {best_start + actual_seg:.1f}s")
+
+            trimmed = INPUT / "trimmed.mp4"
+            run_cmd([
+                "ffmpeg", "-y",
+                "-ss", str(best_start),
+                "-i", str(raw),
+                "-t", str(actual_seg),
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+                "-an", str(trimmed)
+            ])
+
+            final_path = OUTPUT / "final.mp4"
+            safe_caption = ffmpeg_escape(caption)
+            vf = (
+                f"scale=1080:1920:force_original_aspect_ratio=decrease,"
+                f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,"
+                f"drawtext=text='{safe_caption}':"
+                f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
+                f"fontcolor=white:fontsize=54:x=(w-text_w)/2:y=(h-text_h)/2:"
+                f"box=1:boxcolor=black@0.72:boxborderw=40"
             )
+            run_cmd([
+                "ffmpeg", "-y",
+                "-i", str(trimmed),
+                "-vf", vf,
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-an", str(final_path)
+            ])
 
-            uploaded = upload_output(final_path)
-            archive_clips(selected_files)
-
+            upload_output(final_path)
             pipeline_status["done"] = True
-            pipeline_status["drive_file_id"] = uploaded.get("id")
-            pipeline_status["drive_file_name"] = uploaded.get("name")
-            log("Done!")
+            plog("Done!")
 
         except Exception as e:
-            log(f"Error: {e}")
-            log(traceback.format_exc())
+            plog(f"Error: {e}")
+            plog(traceback.format_exc())
             pipeline_status["error"] = str(e)
         finally:
             pipeline_status["running"] = False
 
 
-HTML = """
-<!DOCTYPE html>
+# =============================================================================
+# HTML
+# =============================================================================
+
+HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Clip Studio</title>
 <style>
-body{font-family:Arial,sans-serif;background:#0a0a0f;color:#fff;max-width:760px;margin:0 auto;padding:32px}
-h1{color:#c8ff00}
-.section{margin-bottom:24px}
-.box{border:1px solid #333;padding:16px;border-radius:12px;background:#13131a}
-.item{display:flex;gap:10px;align-items:center;padding:10px;border:1px solid #2a2a3d;border-radius:10px;margin-bottom:8px}
-.thumb{width:52px;height:52px;object-fit:cover;border-radius:6px;background:#222}
-button{padding:12px 18px;border:none;border-radius:10px;cursor:pointer;font-weight:bold}
-#ask-ai-btn{background:#7c4dff;color:#fff}
-#run-btn{background:#c8ff00;color:#000}
-input{width:100%;padding:14px;border-radius:10px;border:1px solid #333;background:#13131a;color:#fff}
-#log{white-space:pre-wrap;font-family:monospace;max-height:260px;overflow:auto}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Arial,sans-serif;background:#000;color:#fff;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.wrap{width:100%;max-width:480px;padding:40px 24px}
+h1{font-size:1.4rem;font-weight:900;color:#00a6ff;margin-bottom:2px}
+.sub{font-size:.65rem;color:#222;font-family:monospace;margin-bottom:28px}
+.clip-card{background:#0d0d0d;border:1px solid #1c1c1c;border-radius:10px;padding:12px;display:flex;align-items:center;gap:12px;margin-bottom:20px;min-height:72px}
+.clip-thumb{width:64px;height:64px;object-fit:cover;border-radius:6px;background:#111;flex-shrink:0}
+.clip-info{flex:1;overflow:hidden}
+.clip-name{font-size:.8rem;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#fff}
+.clip-meta{font-size:.65rem;color:#333;font-family:monospace;margin-top:3px}
+.prompt-row{position:relative;margin-bottom:10px}
+#prompt{width:100%;background:#0d0d0d;border:1px solid #1c1c1c;border-radius:10px;padding:13px 48px 13px 14px;font-size:.9rem;color:#fff;outline:none;transition:border-color .15s}
+#prompt:focus{border-color:#00a6ff}
+#go-btn{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:#00a6ff;color:#000;border:none;border-radius:7px;width:32px;height:32px;font-size:.95rem;font-weight:900;cursor:pointer;transition:opacity .15s}
+#go-btn:hover{opacity:.8}
+#go-btn:disabled{opacity:.2;cursor:not-allowed}
+#refresh-btn{width:100%;background:none;border:1px solid #1a1a1a;border-radius:8px;color:#222;font-size:.65rem;font-family:monospace;padding:8px;cursor:pointer;transition:border-color .15s,color .15s;margin-bottom:24px}
+#refresh-btn:hover{border-color:#00a6ff;color:#00a6ff}
+#log{font-family:monospace;font-size:.68rem;line-height:1.8;color:#333;max-height:280px;overflow-y:auto;white-space:pre-wrap}
+#log.active{color:#00a6ff}
+#log.done{color:#00e676}
+#log.error{color:#ff4d6d}
 </style>
 </head>
 <body>
-<h1>Clip Studio</h1>
+<div class="wrap">
+  <h1>Clip Studio</h1>
+  <div class="sub">AI VIDEO DIRECTOR</div>
 
-<div class="section">
-  <h3>Clips</h3>
-  <div id="clip-list" class="box">Loading clips...</div>
-</div>
+  <div id="clip-card" class="clip-card">
+    <div class="clip-thumb"></div>
+    <div class="clip-info">
+      <div class="clip-name">Loading latest clip...</div>
+      <div class="clip-meta"></div>
+    </div>
+  </div>
 
-<div class="section">
-  <h3>Music</h3>
-  <div id="music-list" class="box">Loading music...</div>
-</div>
-
-<div class="section">
-  <h3>Title / Caption</h3>
-  <input id="caption" placeholder="Enter title...">
-</div>
-
-<div class="section">
-  <h3>AI Director</h3>
-  <input id="ai-prompt" placeholder='e.g. "hype reel, fast cuts"'>
-</div>
-
-<div class="section">
-  <button id="ask-ai-btn">Ask AI</button>
-  <button id="run-btn">Run Pipeline</button>
-</div>
-
-<div class="section box">
-  <h3>Pipeline Log</h3>
+  <div class="prompt-row">
+    <input id="prompt" placeholder="Describe the vibe e.g. hype moment, funny clip..." autofocus>
+    <button id="go-btn">&#9654;</button>
+  </div>
+  <button id="refresh-btn">&#8635; Refresh Clip</button>
   <div id="log"></div>
 </div>
 
 <script>
-let allFiles = [];
-let allMusic = [];
-let selectedMusicId = null;
-let aiSettings = {
-  caption: "",
-  speed: 1.0,
-  vibe: "normal",
-  cut_style: "every_downbeat",
-  caption_fade_in: 0.5,
-  caption_fade_out: 1.0,
-  ken_burns: false
-};
+var busy = false;
+var currentClip = null;
 
-function getSelectedFiles() {
-  return Array.from(document.querySelectorAll(".clip-check"))
-    .filter(x => x.checked)
-    .map(x => allFiles.find(f => f.id === x.dataset.id))
-    .filter(Boolean);
+function setLog(text, cls) {
+  var el = document.getElementById("log");
+  el.textContent = text;
+  el.className = cls || "";
 }
 
-function getSelectedMusic() {
-  if (!selectedMusicId) return null;
-  return allMusic.find(f => f.id === selectedMusicId) || null;
-}
-
-function loadClips() {
-  fetch("/api/clips").then(r => r.json()).then(data => {
-    allFiles = data.files || [];
-    const list = document.getElementById("clip-list");
-    if (!allFiles.length) {
-      list.innerHTML = "No video files found.";
-      return;
-    }
-    list.innerHTML = allFiles.map(f => {
-      const thumb = f.thumbnailLink ? `<img class="thumb" src="${f.thumbnailLink}">` : `<div class="thumb"></div>`;
-      return `<label class="item">${thumb}<input class="clip-check" data-id="${f.id}" type="checkbox" checked> <span>${f.name}</span></label>`;
-    }).join("");
-  }).catch(() => {
-    document.getElementById("clip-list").textContent = "Failed to load clips.";
-  });
-}
-
-function loadMusic() {
-  fetch("/api/music").then(r => r.json()).then(data => {
-    allMusic = data.files || [];
-    const list = document.getElementById("music-list");
-    let html = `<label class="item"><input type="radio" name="music" checked onclick="selectedMusicId=null"> <span>No music</span></label>`;
-    html += allMusic.map(f =>
-      `<label class="item"><input type="radio" name="music" onclick="selectedMusicId='${f.id}'"> <span>${f.name}</span></label>`
-    ).join("");
-    list.innerHTML = html;
-  }).catch(() => {
-    document.getElementById("music-list").textContent = "Failed to load music.";
-  });
-}
-
-function askAI() {
-  const prompt = document.getElementById("ai-prompt").value.trim();
-  if (!prompt) return;
-
-  fetch("/api/ai-plan", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({
-      prompt,
-      clip_names: getSelectedFiles().map(f => f.name)
+function loadLatestClip() {
+  fetch("/api/latest-clip")
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error || !data.clip) {
+        document.querySelector(".clip-name").textContent = "No clips found in incoming folder.";
+        return;
+      }
+      currentClip = data.clip;
+      var card = document.getElementById("clip-card");
+      var mb = data.clip.size ? (parseInt(data.clip.size) / 1048576).toFixed(1) + " MB" : "";
+      card.innerHTML = (
+        (data.clip.thumbnailLink
+          ? "<img class='clip-thumb' src='" + data.clip.thumbnailLink + "'>"
+          : "<div class='clip-thumb'></div>") +
+        "<div class='clip-info'>" +
+          "<div class='clip-name'>" + data.clip.name + "</div>" +
+          "<div class='clip-meta'>" + mb + " &bull; latest</div>" +
+        "</div>"
+      );
     })
-  }).then(r => r.json()).then(data => {
-    if (data.error) {
-      document.getElementById("log").textContent = "AI error: " + data.error;
-      return;
-    }
-    aiSettings = {
-      caption: data.caption || "",
-      speed: parseFloat(String(data.speed || "1").replace("x", "")) || 1.0,
-      vibe: data.vibe || "normal",
-      cut_style: data.cut_style || "every_downbeat",
-      caption_fade_in: data.caption_fade_in || 0.5,
-      caption_fade_out: data.caption_fade_out || 1.0,
-      ken_burns: !!data.ken_burns
-    };
-    document.getElementById("caption").value = data.caption || "";
-    document.getElementById("log").textContent = JSON.stringify(aiSettings, null, 2);
-  }).catch(err => {
-    document.getElementById("log").textContent = "AI request failed: " + err;
-  });
+    .catch(function() {
+      document.querySelector(".clip-name").textContent = "Failed to load clip.";
+    });
 }
 
-function runPipeline() {
-  const caption = document.getElementById("caption").value.trim();
-  const files = getSelectedFiles();
-  const music = getSelectedMusic();
-  document.getElementById("log").textContent = "";
+function go() {
+  var prompt = document.getElementById("prompt").value.trim();
+  if (!prompt || busy) return;
+  busy = true;
+  document.getElementById("go-btn").disabled = true;
+  setLog("Starting...", "active");
 
   fetch("/api/run", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({
-      files,
-      caption,
-      music_file: music,
-      speed: parseFloat(String(aiSettings.speed || "1").replace("x", "")) || 1.0,
-      vibe: aiSettings.vibe,
-      cut_style: aiSettings.cut_style,
-      caption_fade_in: aiSettings.caption_fade_in,
-      caption_fade_out: aiSettings.caption_fade_out,
-      ken_burns: aiSettings.ken_burns
-    })
-  }).then(r => r.json()).then(data => {
+    body: JSON.stringify({prompt: prompt})
+  }).then(function(r) { return r.json(); }).then(function(data) {
     if (data.error) {
-      document.getElementById("log").textContent = "Error: " + data.error;
+      setLog("Error: " + data.error, "error");
+      busy = false;
+      document.getElementById("go-btn").disabled = false;
       return;
     }
     pollLog();
-  }).catch(err => {
-    document.getElementById("log").textContent = "Run failed: " + err;
+  }).catch(function(e) {
+    setLog("Failed: " + e, "error");
+    busy = false;
+    document.getElementById("go-btn").disabled = false;
   });
 }
 
 function pollLog() {
-  const timer = setInterval(() => {
-    fetch("/api/status").then(r => r.json()).then(data => {
-      document.getElementById("log").textContent = (data.log || []).join("\\n");
-      if (!data.running) clearInterval(timer);
+  var timer = setInterval(function() {
+    fetch("/api/status").then(function(r) { return r.json(); }).then(function(data) {
+      setLog((data.log || []).join(String.fromCharCode(10)), data.running ? "active" : (data.done ? "done" : "error"));
+      if (!data.running) {
+        clearInterval(timer);
+        busy = false;
+        document.getElementById("go-btn").disabled = false;
+        if (data.done) loadLatestClip();
+      }
     });
   }, 1000);
 }
 
-document.getElementById("ask-ai-btn").addEventListener("click", askAI);
-document.getElementById("run-btn").addEventListener("click", runPipeline);
+document.getElementById("go-btn").addEventListener("click", go);
+document.getElementById("refresh-btn").addEventListener("click", loadLatestClip);
+document.getElementById("prompt").addEventListener("keydown", function(e) { if (e.key === "Enter") go(); });
 
-loadClips();
-loadMusic();
+loadLatestClip();
 </script>
 </body>
-</html>
-"""
+</html>"""
 
+
+# =============================================================================
+# ROUTES
+# =============================================================================
 
 @app.route("/")
 def index():
     return app.response_class(HTML.encode("utf-8"), mimetype="text/html")
 
 
-@app.route("/api/clips")
-def api_clips():
+@app.route("/api/latest-clip")
+def api_latest_clip():
     try:
-        return jsonify({"files": list_incoming_files()})
+        clip = get_latest_video()
+        return jsonify({"clip": clip})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/music")
-def api_music():
-    try:
-        return jsonify({"files": list_music_files()})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/ai-plan", methods=["POST"])
-def api_ai_plan():
-    try:
-        data = request.json or {}
-        music_files = list_music_files()
-        plan = ask_openai(data.get("prompt", ""), data.get("clip_names", []), music_files)
-        return jsonify(plan)
-    except Exception as e:
-        print(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/run", methods=["POST"])
 def api_run():
-    global pipeline_status
-    try:
-        if pipeline_status.get("running"):
-            return jsonify({"error": "Already running"}), 409
-
-        data = request.json or {}
-        selected_files = data.get("files", [])
-        caption = data.get("caption", "").strip()
-
-        if not selected_files or not caption:
-            return jsonify({"error": "Missing files or caption"}), 400
-
-        thread = threading.Thread(
-            target=run_pipeline,
-            args=(
-                selected_files,
-                caption,
-                safe_float(data.get("speed"), 1.0),
-                data.get("vibe") or "normal",
-                data.get("music_file"),
-                data.get("cut_style") or "every_downbeat",
-                safe_float(data.get("caption_fade_in"), 0.5),
-                safe_float(data.get("caption_fade_out"), 1.0),
-                bool(data.get("ken_burns") or False),
-            ),
-            daemon=True
-        )
-        thread.start()
-        return jsonify({"ok": True})
-    except Exception as e:
-        print(traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
+    if pipeline_status.get("running"):
+        return jsonify({"error": "Already running"}), 409
+    data = request.json or {}
+    prompt = data.get("prompt", "").strip()
+    if not prompt:
+        return jsonify({"error": "No prompt"}), 400
+    threading.Thread(target=run_pipeline, args=(prompt,), daemon=True).start()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/status")
