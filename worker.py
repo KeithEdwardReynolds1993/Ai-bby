@@ -330,11 +330,11 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
     capped_clips = []
     for i, clip in enumerate(local_clips):
         dur = get_video_duration(clip)
-        if dur > 45:
+        if dur > 30:
             out = INPUT / f"capped{i+1:02d}.mp4"
-            run(["ffmpeg", "-y", "-i", str(clip), "-t", "45", "-c", "copy", str(out)])
+            run(["ffmpeg", "-y", "-i", str(clip), "-t", "30", "-c", "copy", str(out)])
             capped_clips.append(out)
-            log(f"Capped clip{i+1} from {dur:.1f}s to 45s")
+            log(f"Capped clip{i+1} from {dur:.1f}s to 30s")
         else:
             capped_clips.append(clip)
     local_clips = capped_clips
