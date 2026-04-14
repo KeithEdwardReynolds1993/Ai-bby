@@ -356,39 +356,31 @@ def run_pipeline(prompt=""):
             for i, m in enumerate(moments):
                 plog(f"  {i+1}. {m['start_time']:.1f}s-{m['end_time']:.1f}s — {m.get('quote', '')[:50]}")
 
-            plog("Downloading audio stream for clean cut detection...")
-            service = drive()
-            audio_path = download_audio_only(service, video)
-
-            plog("Refining cut points using audio silence detection...")
+            plog("Snapping to word boundaries from JSON timestamps...")
             segments = []
             for m in moments:
                 raw_start = float(m["start_time"])
                 raw_end = float(m["end_time"])
 
-                # If we have word timestamps, snap to nearest word boundary first
                 if word_timestamps:
-                    starts = [w["start"] for w in word_timestamps if abs(w["start"] - raw_start) < 3.0]
-                    ends = [w["end"] for w in word_timestamps if abs(w["end"] - raw_end) < 3.0]
+                    starts = [w["start"] for w in word_timestamps if abs(w["start"] - raw_start) < 5.0]
+                    ends = [w["end"] for w in word_timestamps if abs(w["end"] - raw_end) < 5.0]
                     if starts:
                         raw_start = min(starts, key=lambda t: abs(t - raw_start))
                     if ends:
                         raw_end = min(ends, key=lambda t: abs(t - raw_end))
 
-                clean_start = find_clean_cut(audio_path, raw_start)
-                clean_end = find_clean_cut(audio_path, raw_end)
-                if clean_end > clean_start:
-                    segments.append((clean_start, clean_end, m.get("quote", "")))
+                if raw_end > raw_start:
+                    segments.append((raw_start, raw_end, m.get("quote", "")))
+                    plog(f"  Segment: {raw_start:.2f}s — {raw_end:.2f}s | {m.get('quote','')[:50]}")
 
             plog(f"Final segments: {len(segments)}")
 
-            plog("Getting video metadata...")
-            # Use ffprobe on the audio file for duration, hardcode dimensions
-            r = subprocess.run(
-                ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(audio_path)],
-                capture_output=True, text=True, check=True
-            )
-            duration = float(json.loads(r.stdout)["format"]["duration"])
+            # Get duration from JSON transcript
+            if word_timestamps:
+                duration = word_timestamps[-1]["end"] + 1.0
+            else:
+                duration = max(e for _, e, _ in segments) + 1.0
             width, height = 1920, 1080
 
             plog("Generating FCPXML...")
