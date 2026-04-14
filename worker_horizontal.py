@@ -120,11 +120,10 @@ def get_transcript(video_name):
 
 
 def download_audio_only(service, file_obj):
-    """Download just the audio stream — much faster than full video."""
-    plog(f"Downloading audio stream from {file_obj['name']}...")
-    raw_audio = INPUT / "raw_audio.aac"
-    req = service.files().get_media(fileId=file_obj["id"])
+    """Download full file then extract low-res mono audio for analysis."""
+    plog(f"Downloading {file_obj['name']} for audio extraction...")
     raw_video_tmp = INPUT / "raw_tmp.mp4"
+    req = service.files().get_media(fileId=file_obj["id"])
     with open(raw_video_tmp, "wb") as fh:
         downloader = MediaIoBaseDownload(fh, req)
         done = False
@@ -132,13 +131,15 @@ def download_audio_only(service, file_obj):
             status, done = downloader.next_chunk()
             if status:
                 plog(f"  Download: {int(status.progress() * 100)}%")
-    # Extract audio only
+    # Extract low-res mono audio for fast analysis
+    raw_audio = INPUT / "raw_audio.wav"
     subprocess.run([
         "ffmpeg", "-y", "-i", str(raw_video_tmp),
-        "-vn", "-acodec", "copy", str(raw_audio)
+        "-vn", "-ar", "8000", "-ac", "1", "-ab", "16k",
+        str(raw_audio)
     ], check=True, capture_output=True)
     raw_video_tmp.unlink()
-    plog("Audio extracted.")
+    plog(f"Low-res audio extracted ({raw_audio.stat().st_size // 1024}KB)")
     return raw_audio
 
 
