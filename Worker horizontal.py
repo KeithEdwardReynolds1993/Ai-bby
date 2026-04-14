@@ -4,8 +4,9 @@ import json
 import subprocess
 import threading
 import traceback
-from datetime import datetime
+import uuid
 from pathlib import Path
+from datetime import datetime, timezone, timedelta
 
 import cv2
 import numpy as np
@@ -15,19 +16,20 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 from google.oauth2 import service_account
 
-app = Flask("worker")
+app = Flask("worker_xml")
 
-TMP = Path("/tmp/ai_bby")
+TMP = Path("/tmp/ai_xml")
 INPUT = TMP / "input"
 OUTPUT = TMP / "output"
-MUSIC_DIR = TMP / "music"
 
 SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
 INCOMING_FOLDER = os.getenv("GOOGLE_DRIVE_INCOMING_FOLDER_ID")
 OUTPUT_FOLDER = os.getenv("GOOGLE_DRIVE_OUTPUT_FOLDER_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-MAX_CAPTION_CHARS = int(os.getenv("MAX_CAPTION_CHARS") or "60")
-SEGMENT_DURATION = 15
+
+SEGMENT_DURATION = 15    # seconds per segment
+MAX_SEGMENTS = 20        # max segments to find per clip
+SAMPLE_INTERVAL = 1.0    # analyze every N seconds
 
 pipeline_status = {"running": False, "log": [], "done": False, "error": None}
 pipeline_lock = threading.Lock()
@@ -49,56 +51,29 @@ def drive():
 def ensure_dirs():
     INPUT.mkdir(parents=True, exist_ok=True)
     OUTPUT.mkdir(parents=True, exist_ok=True)
-    MUSIC_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def clean_run_artifacts():
-    for f in list(INPUT.glob("*")) + list(OUTPUT.glob("*")) + list(MUSIC_DIR.glob("*")):
+    for f in list(INPUT.glob("*")) + list(OUTPUT.glob("*")):
         if f.is_file():
             f.unlink()
 
 
-def run_cmd(cmd):
-    print(">>>", " ".join(str(c) for c in cmd))
-    subprocess.run(cmd, check=True)
-
-
-def ffmpeg_escape(text):
-    return (
-        text.replace("\\", r"\\\\")
-            .replace("'", r"'\''")
-            .replace(":", r"\:")
-            .replace("%", r"\%")
-            .replace(",", r"\,")
-            .replace("[", r"\[")
-            .replace("]", r"\]")
-            .replace("\n", " ")
-            .replace("\r", "")
-    )
-
-
-
-def wrap_caption(text, max_chars_per_line=20):
-    """Wrap caption into multiple drawtext calls stacked vertically."""
-    words = text.split()
-    lines = []
-    current = []
-    for word in words:
-        if sum(len(w) for w in current) + len(current) + len(word) > max_chars_per_line and current:
-            lines.append(" ".join(current))
-            current = [word]
-        else:
-            current.append(word)
-    if current:
-        lines.append(" ".join(current))
-    return lines
-
 def get_duration(path):
     r = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(path)],
+        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", str(path)],
         capture_output=True, text=True, check=True
     )
-    return float(json.loads(r.stdout)["format"]["duration"])
+    data = json.loads(r.stdout)
+    duration = float(data["format"]["duration"])
+    # Get actual video dimensions
+    width, height = 1920, 1080
+    for stream in data.get("streams", []):
+        if stream.get("codec_type") == "video":
+            width = stream.get("width", 1920)
+            height = stream.get("height", 1080)
+            break
+    return duration, width, height
 
 
 # =============================================================================
@@ -120,82 +95,38 @@ def get_latest_video():
 
 
 def download_file(service, file_obj, target):
+    plog(f"Downloading {file_obj['name']}...")
     req = service.files().get_media(fileId=file_obj["id"])
     with open(target, "wb") as fh:
         downloader = MediaIoBaseDownload(fh, req)
         done = False
         while not done:
-            _, done = downloader.next_chunk()
+            status, done = downloader.next_chunk()
+            if status:
+                plog(f"  {int(status.progress() * 100)}%")
 
 
-def upload_output(final_path):
+def upload_xml(xml_path):
     service = drive()
     uploaded = service.files().create(
-        body={"name": final_path.name, "parents": [OUTPUT_FOLDER]},
-        media_body=MediaFileUpload(str(final_path), mimetype="video/mp4"),
+        body={"name": xml_path.name, "parents": [OUTPUT_FOLDER]},
+        media_body=MediaFileUpload(str(xml_path), mimetype="application/xml"),
         fields="id,name",
         supportsAllDrives=True
     ).execute()
-    plog(f"Uploaded: {uploaded.get('name')} ({uploaded.get('id')})")
+    plog(f"Uploaded XML: {uploaded.get('name')} ({uploaded.get('id')})")
     return uploaded
 
 
 # =============================================================================
-# VISION ANALYSIS
+# OPTICAL FLOW + FACE DETECTION — find best segments
 # =============================================================================
 
-def analyze_thumbnail(thumbnail_url):
-    if not thumbnail_url or not OPENAI_API_KEY:
-        return {}
-    try:
-        resp = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": "gpt-4o",
-                "messages": [{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                "Analyze this video thumbnail. Return ONLY JSON:\n"
-                                "- description: string (1-2 sentences)\n"
-                                "- mood: string (energetic/calm/funny/dramatic/inspirational)\n"
-                                "- subjects: list of strings\n"
-                                "- energy: string (low/medium/high)\n"
-                                "- setting: string (indoor/outdoor/studio/unknown)"
-                            )
-                        },
-                        {"type": "image_url", "image_url": {"url": thumbnail_url}}
-                    ]
-                }],
-                "max_tokens": 300
-            },
-            timeout=20
-        )
-        content = resp.json()["choices"][0]["message"]["content"].strip()
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-        return json.loads(content.strip())
-    except Exception as e:
-        plog(f"Vision analysis failed: {e}")
-        return {}
-
-
-# =============================================================================
-# OPTICAL FLOW + FACE DETECTION
-# =============================================================================
-
-def find_best_segment(video_path, total_duration):
-    if total_duration <= SEGMENT_DURATION:
-        return 0.0
-
+def find_best_segments(video_path, total_duration):
+    plog("Analyzing video with optical flow + face detection...")
     cap = cv2.VideoCapture(str(video_path))
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    sample_interval = max(1, int(fps * 0.5))
+    sample_interval_frames = max(1, int(fps * SAMPLE_INTERVAL))
     face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 
     frame_scores = []
@@ -206,7 +137,7 @@ def find_best_segment(video_path, total_duration):
         ret, frame = cap.read()
         if not ret:
             break
-        if frame_idx % sample_interval == 0:
+        if frame_idx % sample_interval_frames == 0:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             small = cv2.resize(gray, (320, 180))
             motion = 0.0
@@ -220,144 +151,105 @@ def find_best_segment(video_path, total_duration):
         frame_idx += 1
 
     cap.release()
+    plog(f"Analyzed {len(frame_scores)} sample frames")
 
     if not frame_scores:
-        return 0.0
+        return [(0.0, SEGMENT_DURATION)]
 
-    window = int(SEGMENT_DURATION / 0.5)
-    best_score = -1
-    best_start = 0.0
+    # Sliding window to find top segments
+    window = max(1, int(SEGMENT_DURATION / SAMPLE_INTERVAL))
+    scored_windows = []
 
-    for i in range(max(1, len(frame_scores) - window + 1)):
+    for i in range(len(frame_scores) - window + 1):
         score = sum(s for _, s in frame_scores[i:i + window])
-        if score > best_score:
-            best_score = score
-            best_start = frame_scores[i][0]
+        start = frame_scores[i][0]
+        scored_windows.append((score, start))
 
-    return min(best_start, total_duration - SEGMENT_DURATION)
+    scored_windows.sort(reverse=True)
 
+    # Pick top non-overlapping segments
+    segments = []
+    for score, start in scored_windows:
+        end = start + SEGMENT_DURATION
+        # Check no overlap with already selected
+        overlap = False
+        for s_start, s_end in segments:
+            if not (end <= s_start or start >= s_end):
+                overlap = True
+                break
+        if not overlap:
+            actual_dur = min(SEGMENT_DURATION, total_duration - start)
+            if actual_dur >= 3:  # skip tiny segments
+                segments.append((start, end))
+            if len(segments) >= MAX_SEGMENTS:
+                break
 
+    # Sort chronologically
+    segments.sort()
+    plog(f"Found {len(segments)} best segments")
+    return [(s, min(SEGMENT_DURATION, total_duration - s)) for s, e in segments]
 
-GUIDE_FOLDER = os.getenv("GOOGLE_DRIVE_GUIDE_FOLDER_ID", "")
-INTERVIEW_FOLDER = os.getenv("GOOGLE_DRIVE_INTERVIEW_FOLDER_ID", "")
-MUSIC_FOLDER = os.getenv("GOOGLE_DRIVE_MUSIC_FOLDER_ID", "")
-
-def load_style_guide():
-    if not GUIDE_FOLDER:
-        return ""
-    try:
-        service = drive()
-        results = service.files().list(
-            q=f"'{GUIDE_FOLDER}' in parents and trashed=false",
-            fields="files(id,mimeType)",
-            includeItemsFromAllDrives=True,
-            supportsAllDrives=True,
-            corpora="allDrives"
-        ).execute()
-        files = results.get("files", [])
-        if not files:
-            return ""
-        f = files[0]
-        if "google-apps.document" in f.get("mimeType", ""):
-            req = service.files().export_media(fileId=f["id"], mimeType="text/plain")
-        else:
-            req = service.files().get_media(fileId=f["id"])
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, req)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-        fh.seek(0)
-        return fh.read().decode("utf-8", errors="ignore")[:3000]
-    except Exception as e:
-        print(f"Style guide error: {e}")
-        return ""
 
 # =============================================================================
-# AI CAPTION
+# FCPXML GENERATOR
 # =============================================================================
 
-def list_music_files():
-    if not MUSIC_FOLDER:
-        return []
-    try:
-        service = drive()
-        results = service.files().list(
-            q=f"'{MUSIC_FOLDER}' in parents and trashed=false",
-            fields="files(id,name,mimeType)",
-            includeItemsFromAllDrives=True,
-            supportsAllDrives=True,
-            corpora="allDrives"
-        ).execute()
-        return [f for f in results.get("files", [])
-                if f.get("mimeType", "").startswith(("audio/", "video/mp4"))]
-    except Exception as e:
-        plog(f"Music fetch failed: {e}")
-        return []
+def seconds_to_rational(seconds, fps=30):
+    """Convert seconds to FCP rational time format."""
+    frames = round(seconds * fps)
+    return f"{frames}/30s" if fps == 30 else f"{round(seconds * 30)}/30s"
 
 
-def generate_caption_and_music(vision, music_files):
-    if not OPENAI_API_KEY:
-        raise ValueError("OPENAI_API_KEY not set")
+def generate_fcpxml(video_file, segments, duration, width, height, orig_filename):
+    fps = 30
+    uid = str(uuid.uuid4()).upper()
+    asset_id = f"r1"
+    format_id = f"r2"
+    seq_id = f"r3"
 
-    vision_summary = (
-        f"Description: {vision.get('description', 'unknown')}\n"
-        f"Mood: {vision.get('mood', 'unknown')}\n"
-        f"Energy: {vision.get('energy', 'unknown')}\n"
-        f"Setting: {vision.get('setting', 'unknown')}\n"
-        f"Subjects: {', '.join(vision.get('subjects', []))}"
-    )
+    # Timeline duration = sum of all segments
+    total_timeline = sum(d for _, d in segments)
 
-    style_guide = load_style_guide()
-    if style_guide:
-        vision_summary += f"\n\nStyle Guide:\n{style_guide}"
+    lines = []
+    lines.append('<?xml version="1.0" encoding="UTF-8"?>')
+    lines.append('<!DOCTYPE fcpxml>')
+    lines.append('<fcpxml version="1.10">')
+    lines.append('  <resources>')
+    lines.append(f'    <format id="{format_id}" name="FFVideoFormat{height}p{fps}" '
+                 f'frameDuration="1/{fps}s" width="{width}" height="{height}"/>')
+    lines.append(f'    <asset id="{asset_id}" name="{orig_filename}" uid="{uid}" '
+                 f'start="0s" duration="{seconds_to_rational(duration, fps)}" '
+                 f'hasVideo="1" hasAudio="1">')
+    lines.append(f'      <media-rep kind="original-media" src="file:///REPLACE_WITH_PATH/{orig_filename}"/>')
+    lines.append(f'    </asset>')
+    lines.append('  </resources>')
+    lines.append('  <library>')
+    lines.append('    <event name="AI Selections">')
+    lines.append(f'    <project name="{orig_filename} - AI Edit">')
+    lines.append(f'      <sequence format="{format_id}" duration="{seconds_to_rational(total_timeline, fps)}" '
+                 f'tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">')
+    lines.append('        <spine>')
 
-    music_list = "\n".join([f"- {f['name']}" for f in music_files]) or "No music available."
+    offset = 0.0
+    for i, (start, seg_dur) in enumerate(segments):
+        clip_offset = seconds_to_rational(offset, fps)
+        clip_start = seconds_to_rational(start, fps)
+        clip_dur = seconds_to_rational(seg_dur, fps)
+        lines.append(f'          <asset-clip name="Segment {i+1}" ref="{asset_id}" '
+                     f'offset="{clip_offset}" start="{clip_start}" duration="{clip_dur}" '
+                     f'format="{format_id}" tcFormat="NDF">')
+        lines.append(f'          </asset-clip>')
+        offset += seg_dur
 
-    resp = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-        json={
-            "model": "gpt-4o",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        f"You are a video director. Given a video analysis and a list of music tracks, "
-                        f"write a short punchy caption AND pick the best matching music track.\n"
-                        f"Caption rules: Max 8 words. Bold, impactful, no filler. Write like a confident brand. "
-                        f"Examples: 'This is how winners think' or 'Show up. Do the work.'\n"
-                        f"Music rules: Pick the track whose name best matches the clip's mood and energy.\n"
-                        f"Return ONLY JSON with keys: caption, music_name"
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": f"Video analysis:\n{vision_summary}\n\nAvailable music:\n{music_list}\n\nPick caption and music."
-                }
-            ],
-            "temperature": 0.8
-        },
-        timeout=20
-    )
-    if not resp.ok:
-        raise ValueError(f"OpenAI error {resp.status_code}: {resp.text}")
+    lines.append('        </spine>')
+    lines.append('      </sequence>')
+    lines.append('    </project>')
+    lines.append('    </event>')
+    lines.append('  </library>')
+    lines.append('</fcpxml>')
 
-    content = resp.json()["choices"][0]["message"]["content"].strip()
-    if content.startswith("```"):
-        content = content.split("```")[1]
-        if content.startswith("json"):
-            content = content[4:]
-    result = json.loads(content.strip())
+    return "\n".join(lines)
 
-    caption = result.get("caption", "")
-    music_name = result.get("music_name", "")
-    music_file = next((f for f in music_files if f["name"] == music_name), None)
-    if not music_file and music_files:
-        import random
-        music_file = random.choice(music_files)
-
-    return caption, music_file
 
 # =============================================================================
 # PIPELINE
@@ -377,131 +269,35 @@ def run_pipeline():
                 raise ValueError("No videos found in incoming folder.")
             plog(f"Found: {video['name']}")
 
-            plog("Analyzing thumbnail...")
-            vision = analyze_thumbnail(video.get("thumbnailLink", ""))
-            if vision:
-                plog(f"Vision: {vision.get('description', '')}")
-                plog(f"Mood: {vision.get('mood', '')} | Energy: {vision.get('energy', '')}")
-
-            plog("Generating caption...")
-            plog("Fetching music tracks...")
-            music_files = list_music_files()
-            plog(f"Found {len(music_files)} music track(s)")
-            plog("Generating caption and selecting music...")
-            caption, selected_music = generate_caption_and_music(vision, music_files)
-            caption = " ".join(caption.split()[:8])
-            plog(f"Caption: {caption}")
-            if selected_music:
-                plog(f"Selected music: {selected_music['name']}")
-
-            plog("Downloading video...")
             service = drive()
-            raw = INPUT / "raw_clip.mp4"
+            raw = INPUT / video["name"]
             download_file(service, video, raw)
 
-            total_duration = get_duration(raw)
-            plog(f"Duration: {total_duration:.1f}s")
+            plog("Getting video info...")
+            duration, width, height = get_duration(raw)
+            plog(f"Duration: {duration:.1f}s | {width}x{height}")
 
-            plog(f"Finding best {SEGMENT_DURATION}s segment...")
-            best_start = find_best_segment(raw, total_duration)
-            actual_seg = min(SEGMENT_DURATION, total_duration - best_start)
-            plog(f"Best segment: {best_start:.1f}s — {best_start + actual_seg:.1f}s")
+            segments = find_best_segments(raw, duration)
+            plog(f"Selected {len(segments)} segments totaling {sum(d for _,d in segments):.1f}s")
 
-            trimmed = INPUT / "trimmed.mp4"
-            run_cmd([
-                "ffmpeg", "-y",
-                "-ss", str(best_start),
-                "-i", str(raw),
-                "-t", str(actual_seg),
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
-                "-an", str(trimmed)
-            ])
+            for i, (start, dur) in enumerate(segments):
+                plog(f"  Segment {i+1}: {start:.1f}s — {start+dur:.1f}s")
 
-            from datetime import timezone, timedelta
+            plog("Generating FCPXML...")
+            xml_content = generate_fcpxml(
+                video, segments, duration, width, height, video["name"]
+            )
+
             central = datetime.now(timezone(timedelta(hours=-5)))
-            date_str = central.strftime("%m-%d-%Y %I:%M %p")
-            file_caption = " ".join(caption.split()[:8]).rstrip(".")
-            orig_name = video["name"].rsplit(".", 1)[0]
-            final_path = OUTPUT / f"{file_caption}_{orig_name}_{date_str}.mp4"
-            lines = wrap_caption(caption, max_chars_per_line=12)
-            fontsize = 52
-            line_spacing = 10
-            pad_x = 48
-            pad_y = 28
-            font = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+            date_str = central.strftime("%m-%d-%Y %I%M %p")
+            xml_name = f"{video['name'].rsplit('.', 1)[0]}_{date_str}.fcpxml"
+            xml_path = OUTPUT / xml_name
+            xml_path.write_text(xml_content, encoding="utf-8")
 
-            line_h = fontsize + line_spacing
-            total_text_h = len(lines) * line_h - line_spacing
-            block_h = total_text_h + pad_y * 2
-            block_y = (1080 - block_h) // 2
-
-            # Estimate width from longest line
-            max_chars = max(len(l) for l in lines)
-            est_w = int(max_chars * fontsize * 0.6)
-            box_w = min(est_w + pad_x * 2, 1800)
-            box_x = (1920 - box_w) // 2
-
-            # One solid black box behind all text
-            drawbox = (
-                f"drawbox="
-                f"x={box_x}:y={block_y}:"
-                f"w={box_w}:h={block_h}:"
-                f"color=black:t=fill"
-            )
-
-            # Text lines on top, no individual boxes
-            drawtext_filters = [drawbox]
-            for i, line in enumerate(lines):
-                safe_line = ffmpeg_escape(line)
-                y = block_y + pad_y + i * line_h
-                drawtext_filters.append(
-                    f"drawtext=text='{safe_line}':"
-                    f"fontfile={font}:"
-                    f"fontcolor=white:fontsize={fontsize}:"
-                    f"x=(w-text_w)/2:y={y}"
-                )
-
-            base = (
-                "scale=1080:1920:force_original_aspect_ratio=decrease,"
-                "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
-            )
-            vf = base + "," + ",".join(drawtext_filters)
-
-            music = selected_music
-            if music:
-                plog(f"Music: {music['name']}")
-                music_path = MUSIC_DIR / music["name"]
-                download_file(service, music, music_path)
-                music_trimmed = MUSIC_DIR / "music_trim.aac"
-                run_cmd([
-                    "ffmpeg", "-y", "-i", str(music_path),
-                    "-t", str(actual_seg),
-                    "-af", f"afade=t=in:st=0:d=1,afade=t=out:st={max(0, actual_seg-2)}:d=2,volume=0.8",
-                    str(music_trimmed)
-                ])
-                run_cmd([
-                    "ffmpeg", "-y",
-                    "-i", str(trimmed),
-                    "-i", str(music_trimmed),
-                    "-vf", vf,
-                    "-map", "0:v", "-map", "1:a",
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                    "-c:a", "aac", "-b:a", "192k",
-                    str(final_path)
-                ])
-            else:
-                plog("No music found, rendering without.")
-                run_cmd([
-                    "ffmpeg", "-y",
-                    "-i", str(trimmed),
-                    "-vf", vf,
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                    "-an", str(final_path)
-                ])
-
-            upload_output(final_path)
+            upload_xml(xml_path)
             pipeline_status["done"] = True
-            plog("Done!")
+            plog("Done! Open the FCPXML in Final Cut Pro.")
+            plog("Note: Update the media path in the XML to match where your original file lives.")
 
         except Exception as e:
             plog(f"Error: {e}")
@@ -520,7 +316,7 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Clip Studio</title>
+<title>XML Editor</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:Arial,sans-serif;background:#000;color:#fff;min-height:100vh;display:flex;align-items:center;justify-content:center}
@@ -532,15 +328,12 @@ h1{font-size:1.4rem;font-weight:900;color:#00a6ff;margin-bottom:2px}
 .clip-info{flex:1;overflow:hidden}
 .clip-name{font-size:.8rem;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#fff}
 .clip-meta{font-size:.65rem;color:#333;font-family:monospace;margin-top:3px}
-
-
-
 #go-btn{width:100%;background:#00a6ff;color:#000;border:none;border-radius:10px;padding:14px;font-size:1rem;font-weight:900;cursor:pointer;transition:opacity .15s;margin-bottom:10px;letter-spacing:.05em}
 #go-btn:hover{opacity:.8}
 #go-btn:disabled{opacity:.2;cursor:not-allowed}
 #refresh-btn{width:100%;background:none;border:1px solid #1a1a1a;border-radius:8px;color:#222;font-size:.65rem;font-family:monospace;padding:8px;cursor:pointer;transition:border-color .15s,color .15s;margin-bottom:24px}
 #refresh-btn:hover{border-color:#00a6ff;color:#00a6ff}
-#log{font-family:monospace;font-size:.68rem;line-height:1.8;color:#333;max-height:280px;overflow-y:auto;white-space:pre-wrap}
+#log{font-family:monospace;font-size:.68rem;line-height:1.8;color:#333;max-height:320px;overflow-y:auto;white-space:pre-wrap}
 #log.active{color:#00a6ff}
 #log.done{color:#00e676}
 #log.error{color:#ff4d6d}
@@ -548,8 +341,8 @@ h1{font-size:1.4rem;font-weight:900;color:#00a6ff;margin-bottom:2px}
 </head>
 <body>
 <div class="wrap">
-  <h1>Clip Studio</h1>
-  <div class="sub">AI VIDEO DIRECTOR</div>
+  <h1>XML Editor</h1>
+  <div class="sub">FCPXML GENERATOR</div>
 
   <div id="clip-card" class="clip-card">
     <div class="clip-thumb"></div>
@@ -559,14 +352,13 @@ h1{font-size:1.4rem;font-weight:900;color:#00a6ff;margin-bottom:2px}
     </div>
   </div>
 
-  <button id="go-btn">GO</button>
+  <button id="go-btn">GENERATE XML</button>
   <button id="refresh-btn">&#8635; Refresh Clip</button>
   <div id="log"></div>
 </div>
 
 <script>
 var busy = false;
-var currentClip = null;
 
 function setLog(text, cls) {
   var el = document.getElementById("log");
@@ -578,25 +370,14 @@ function loadLatestClip() {
   fetch("/api/latest-clip")
     .then(function(r) { return r.json(); })
     .then(function(data) {
-      if (data.error || !data.clip) {
-        document.querySelector(".clip-name").textContent = "No clips found in incoming folder.";
-        return;
-      }
-      currentClip = data.clip;
+      if (!data.clip) { document.querySelector(".clip-name").textContent = "No clips found."; return; }
       var card = document.getElementById("clip-card");
       var mb = data.clip.size ? (parseInt(data.clip.size) / 1048576).toFixed(1) + " MB" : "";
-      card.innerHTML = (
-        (data.clip.thumbnailLink
-          ? "<img class='clip-thumb' src='" + data.clip.thumbnailLink + "'>"
-          : "<div class='clip-thumb'></div>") +
-        "<div class='clip-info'>" +
-          "<div class='clip-name'>" + data.clip.name + "</div>" +
-          "<div class='clip-meta'>" + mb + " &bull; latest</div>" +
-        "</div>"
-      );
-    })
-    .catch(function() {
-      document.querySelector(".clip-name").textContent = "Failed to load clip.";
+      card.innerHTML = (data.clip.thumbnailLink
+        ? "<img class='clip-thumb' src='" + data.clip.thumbnailLink + "'>"
+        : "<div class='clip-thumb'></div>") +
+        "<div class='clip-info'><div class='clip-name'>" + data.clip.name + "</div>" +
+        "<div class='clip-meta'>" + mb + " &bull; latest</div></div>";
     });
 }
 
@@ -605,24 +386,12 @@ function go() {
   busy = true;
   document.getElementById("go-btn").disabled = true;
   setLog("Starting...", "active");
-
-  fetch("/api/run", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({})
-  }).then(function(r) { return r.json(); }).then(function(data) {
-    if (data.error) {
-      setLog("Error: " + data.error, "error");
-      busy = false;
-      document.getElementById("go-btn").disabled = false;
-      return;
-    }
-    pollLog();
-  }).catch(function(e) {
-    setLog("Failed: " + e, "error");
-    busy = false;
-    document.getElementById("go-btn").disabled = false;
-  });
+  fetch("/api/run", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({})})
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) { setLog("Error: " + data.error, "error"); busy = false; document.getElementById("go-btn").disabled = false; return; }
+      pollLog();
+    });
 }
 
 function pollLog() {
@@ -633,7 +402,6 @@ function pollLog() {
         clearInterval(timer);
         busy = false;
         document.getElementById("go-btn").disabled = false;
-        if (data.done) loadLatestClip();
       }
     });
   }, 1000);
@@ -641,8 +409,6 @@ function pollLog() {
 
 document.getElementById("go-btn").addEventListener("click", go);
 document.getElementById("refresh-btn").addEventListener("click", loadLatestClip);
-
-
 loadLatestClip();
 </script>
 </body>
