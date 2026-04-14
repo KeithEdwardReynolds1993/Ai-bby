@@ -319,6 +319,19 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
         download_file(service, music_file_obj, music_path)
         music_analysis = analyze_music(music_path)
 
+    # ── Cap clips at 45 seconds ──
+    capped_clips = []
+    for i, clip in enumerate(local_clips):
+        dur = get_video_duration(clip)
+        if dur > 45:
+            out = INPUT / f"capped{i+1:02d}.mp4"
+            run(["ffmpeg", "-y", "-i", str(clip), "-t", "45", "-c", "copy", str(out)])
+            capped_clips.append(out)
+            log(f"Capped clip{i+1} from {dur:.1f}s to 45s")
+        else:
+            capped_clips.append(clip)
+    local_clips = capped_clips
+
     # ── Apply speed ──
     if abs(speed - 1.0) > 0.01:
         sped_clips = []
