@@ -276,7 +276,26 @@ def load_style_guide():
 # AI CAPTION
 # =============================================================================
 
-def generate_caption(vision):
+def list_music_files():
+    if not MUSIC_FOLDER:
+        return []
+    try:
+        service = drive()
+        results = service.files().list(
+            q=f"'{MUSIC_FOLDER}' in parents and trashed=false",
+            fields="files(id,name,mimeType)",
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+            corpora="allDrives"
+        ).execute()
+        return [f for f in results.get("files", [])
+                if f.get("mimeType", "").startswith(("audio/", "video/mp4"))]
+    except Exception as e:
+        plog(f"Music fetch failed: {e}")
+        return []
+
+
+def generate_caption_and_music(vision, music_files):
     if not OPENAI_API_KEY:
         raise ValueError("OPENAI_API_KEY not set")
 
@@ -289,7 +308,10 @@ def generate_caption(vision):
     )
 
     style_guide = load_style_guide()
-    vision_summary += f"\n\nStyle Guide:\n{style_guide}" if style_guide else ""
+    if style_guide:
+        vision_summary += f"\n\nStyle Guide:\n{style_guide}"
+
+    music_list = "\n".join([f"- {f['name']}" for f in music_files]) or "No music available."
 
     resp = requests.post(
         "https://api.openai.com/v1/chat/completions",
@@ -300,16 +322,17 @@ def generate_caption(vision):
                 {
                     "role": "system",
                     "content": (
-                        f"You write short punchy video captions. Max {MAX_CAPTION_CHARS} chars. "
-                        "Captions will be word-wrapped at ~20 characters per line and displayed "
-                        "centered on a vertical video. Write captions that read naturally across "
-                        "Max 8 words. Bold, punchy, impactful. Can be a short sentence or phrase. No filler words. Write like a motivational brand — confident, direct, memorable. Examples: 'This is how winners think' or 'Every rep builds the future' or 'Show up. Do the work.'. "
-                        "Return ONLY JSON with key: caption"
+                        f"You are a video director. Given a video analysis and a list of music tracks, "
+                        f"write a short punchy caption AND pick the best matching music track.\n"
+                        f"Caption rules: Max 8 words. Bold, impactful, no filler. Write like a confident brand. "
+                        f"Examples: 'This is how winners think' or 'Show up. Do the work.'\n"
+                        f"Music rules: Pick the track whose name best matches the clip's mood and energy.\n"
+                        f"Return ONLY JSON with keys: caption, music_name"
                     )
                 },
                 {
                     "role": "user",
-                    "content": f"Video analysis:\n{vision_summary}\n\nWrite the best caption for this clip."
+                    "content": f"Video analysis:\n{vision_summary}\n\nAvailable music:\n{music_list}\n\nPick caption and music."
                 }
             ],
             "temperature": 0.8
@@ -324,31 +347,16 @@ def generate_caption(vision):
         content = content.split("```")[1]
         if content.startswith("json"):
             content = content[4:]
-    return json.loads(content.strip())["caption"]
+    result = json.loads(content.strip())
 
-
-
-def get_random_music():
-    if not MUSIC_FOLDER:
-        return None
-    try:
-        service = drive()
-        results = service.files().list(
-            q=f"'{MUSIC_FOLDER}' in parents and trashed=false",
-            fields="files(id,name,mimeType)",
-            includeItemsFromAllDrives=True,
-            supportsAllDrives=True,
-            corpora="allDrives"
-        ).execute()
-        files = [f for f in results.get("files", [])
-                 if f.get("mimeType", "").startswith(("audio/", "video/mp4"))]
-        if not files:
-            return None
+    caption = result.get("caption", "")
+    music_name = result.get("music_name", "")
+    music_file = next((f for f in music_files if f["name"] == music_name), None)
+    if not music_file and music_files:
         import random
-        return random.choice(files)
-    except Exception as e:
-        plog(f"Music fetch failed: {e}")
-        return None
+        music_file = random.choice(music_files)
+
+    return caption, music_file
 
 # =============================================================================
 # PIPELINE
@@ -453,8 +461,7 @@ def run_pipeline():
             )
             vf = base + "," + ",".join(drawtext_filters)
 
-            plog("Picking music track...")
-            music = get_random_music()
+            music = selected_music
             if music:
                 plog(f"Music: {music['name']}")
                 music_path = MUSIC_DIR / music["name"]
