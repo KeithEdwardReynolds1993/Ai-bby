@@ -302,7 +302,7 @@ def generate_caption(vision):
                         f"You write short punchy video captions. Max {MAX_CAPTION_CHARS} chars. "
                         "Captions will be word-wrapped at ~20 characters per line and displayed "
                         "centered on a vertical video. Write captions that read naturally across "
-                        "STRICT: Max 5 words. No sentences. No punctuation. Examples: 'Make it count' or 'Stay focused' or 'Built different'. "
+                        "Max 8 words. Bold, punchy, impactful. Can be a short sentence or phrase. No filler words. Write like a motivational brand — confident, direct, memorable. Examples: 'This is how winners think' or 'Every rep builds the future' or 'Show up. Do the work.'. "
                         "Return ONLY JSON with key: caption"
                     )
                 },
@@ -376,7 +376,7 @@ def run_pipeline():
             plog("Generating caption...")
             caption = generate_caption(vision)
             # Hard truncate to 5 words max
-            caption = " ".join(caption.replace(".", "").replace(",", "").split()[:5])
+            caption = " ".join(caption.split()[:8])
             plog(f"Caption: {caption}")
 
             plog("Downloading video...")
