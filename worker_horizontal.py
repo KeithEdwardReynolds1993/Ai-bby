@@ -4,7 +4,6 @@ import json
 import subprocess
 import threading
 import traceback
-import uuid
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
@@ -16,20 +15,22 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 from google.oauth2 import service_account
 
-app = Flask("worker_xml")
+app = Flask("worker_horizontal")
 
-TMP = Path("/tmp/ai_xml")
+TMP = Path("/tmp/ai_horiz")
 INPUT = TMP / "input"
 OUTPUT = TMP / "output"
+MUSIC_DIR = TMP / "music"
 
 SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
 INCOMING_FOLDER = os.getenv("GOOGLE_DRIVE_INCOMING_FOLDER_ID")
+TRANSCRIPTIONS_FOLDER = os.getenv("GOOGLE_DRIVE_TRANSCRIPTIONS_FOLDER_ID", "")
 OUTPUT_FOLDER = os.getenv("GOOGLE_DRIVE_OUTPUT_FOLDER_ID")
+MUSIC_FOLDER = os.getenv("GOOGLE_DRIVE_MUSIC_FOLDER_ID", "")
+GUIDE_FOLDER = os.getenv("GOOGLE_DRIVE_GUIDE_FOLDER_ID", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-SEGMENT_DURATION = 15    # seconds per segment
-MAX_SEGMENTS = 20        # max segments to find per clip
-SAMPLE_INTERVAL = 1.0    # analyze every N seconds
+MAX_CAPTION_CHARS = int(os.getenv("MAX_CAPTION_CHARS") or "80")
+SEGMENT_DURATION = 30
 
 pipeline_status = {"running": False, "log": [], "done": False, "error": None}
 pipeline_lock = threading.Lock()
@@ -51,29 +52,54 @@ def drive():
 def ensure_dirs():
     INPUT.mkdir(parents=True, exist_ok=True)
     OUTPUT.mkdir(parents=True, exist_ok=True)
+    MUSIC_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def clean_run_artifacts():
-    for f in list(INPUT.glob("*")) + list(OUTPUT.glob("*")):
+    for f in list(INPUT.glob("*")) + list(OUTPUT.glob("*")) + list(MUSIC_DIR.glob("*")):
         if f.is_file():
             f.unlink()
 
 
+def run_cmd(cmd):
+    print(">>>", " ".join(str(c) for c in cmd))
+    subprocess.run(cmd, check=True)
+
+
+def ffmpeg_escape(text):
+    return (
+        text.replace("\\", r"\\\\")
+            .replace("'", r"'\''")
+            .replace(":", r"\:")
+            .replace("%", r"\%")
+            .replace(",", r"\,")
+            .replace("[", r"\[")
+            .replace("]", r"\]")
+            .replace("\n", " ")
+            .replace("\r", "")
+    )
+
+
 def get_duration(path):
     r = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", str(path)],
+        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(path)],
         capture_output=True, text=True, check=True
     )
-    data = json.loads(r.stdout)
-    duration = float(data["format"]["duration"])
-    # Get actual video dimensions
-    width, height = 1920, 1080
-    for stream in data.get("streams", []):
-        if stream.get("codec_type") == "video":
-            width = stream.get("width", 1920)
-            height = stream.get("height", 1080)
-            break
-    return duration, width, height
+    return float(json.loads(r.stdout)["format"]["duration"])
+
+
+def wrap_caption(text, max_chars_per_line=32):
+    words = text.split()
+    lines, current = [], []
+    for word in words:
+        if sum(len(w) for w in current) + len(current) + len(word) > max_chars_per_line and current:
+            lines.append(" ".join(current))
+            current = [word]
+        else:
+            current.append(word)
+    if current:
+        lines.append(" ".join(current))
+    return lines
 
 
 # =============================================================================
@@ -94,6 +120,34 @@ def get_latest_video():
     return files[0] if files else None
 
 
+def get_transcript(video_name):
+    if not TRANSCRIPTIONS_FOLDER:
+        return None
+    base = video_name.rsplit(".", 1)[0]
+    service = drive()
+    for ext in [".txt", ".srt", ".vtt"]:
+        results = service.files().list(
+            q=f"name='{base}{ext}' and '{TRANSCRIPTIONS_FOLDER}' in parents and trashed=false",
+            fields="files(id,name)",
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+            corpora="allDrives"
+        ).execute()
+        files = results.get("files", [])
+        if files:
+            req = service.files().get_media(fileId=files[0]["id"])
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, req)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+            fh.seek(0)
+            plog(f"Found transcript: {base}{ext}")
+            return fh.read().decode("utf-8", errors="ignore")
+    plog("No transcript found — will use vision analysis only")
+    return None
+
+
 def download_file(service, file_obj, target):
     plog(f"Downloading {file_obj['name']}...")
     req = service.files().get_media(fileId=file_obj["id"])
@@ -106,149 +160,167 @@ def download_file(service, file_obj, target):
                 plog(f"  {int(status.progress() * 100)}%")
 
 
-def upload_xml(xml_path):
+def upload_output(final_path):
     service = drive()
     uploaded = service.files().create(
-        body={"name": xml_path.name, "parents": [OUTPUT_FOLDER]},
-        media_body=MediaFileUpload(str(xml_path), mimetype="application/xml"),
+        body={"name": final_path.name, "parents": [OUTPUT_FOLDER]},
+        media_body=MediaFileUpload(str(final_path), mimetype="video/mp4"),
         fields="id,name",
         supportsAllDrives=True
     ).execute()
-    plog(f"Uploaded XML: {uploaded.get('name')} ({uploaded.get('id')})")
+    plog(f"Uploaded: {uploaded.get('name')} ({uploaded.get('id')})")
     return uploaded
 
 
-# =============================================================================
-# OPTICAL FLOW + FACE DETECTION — find best segments
-# =============================================================================
+def list_music_files():
+    if not MUSIC_FOLDER:
+        return []
+    try:
+        service = drive()
+        results = service.files().list(
+            q=f"'{MUSIC_FOLDER}' in parents and trashed=false",
+            fields="files(id,name,mimeType)",
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+            corpora="allDrives"
+        ).execute()
+        return [f for f in results.get("files", [])
+                if f.get("mimeType", "").startswith(("audio/", "video/mp4"))]
+    except Exception as e:
+        plog(f"Music fetch failed: {e}")
+        return []
 
-def find_best_segments(video_path, total_duration):
-    plog("Analyzing video with optical flow + face detection...")
-    cap = cv2.VideoCapture(str(video_path))
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    sample_interval_frames = max(1, int(fps * SAMPLE_INTERVAL))
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 
-    frame_scores = []
-    prev_gray = None
-    frame_idx = 0
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        if frame_idx % sample_interval_frames == 0:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            small = cv2.resize(gray, (320, 180))
-            motion = 0.0
-            if prev_gray is not None:
-                flow = cv2.calcOpticalFlowFarneback(prev_gray, small, None, 0.5, 3, 15, 3, 5, 1.2, 0)
-                motion = float(np.mean(np.abs(flow)))
-            faces = face_cascade.detectMultiScale(small, 1.1, 4)
-            face_score = min(len(faces) * 0.4, 1.0)
-            frame_scores.append((frame_idx / fps, motion + face_score))
-            prev_gray = small
-        frame_idx += 1
-
-    cap.release()
-    plog(f"Analyzed {len(frame_scores)} sample frames")
-
-    if not frame_scores:
-        return [(0.0, SEGMENT_DURATION)]
-
-    # Sliding window to find top segments
-    window = max(1, int(SEGMENT_DURATION / SAMPLE_INTERVAL))
-    scored_windows = []
-
-    for i in range(len(frame_scores) - window + 1):
-        score = sum(s for _, s in frame_scores[i:i + window])
-        start = frame_scores[i][0]
-        scored_windows.append((score, start))
-
-    scored_windows.sort(reverse=True)
-
-    # Pick top non-overlapping segments
-    segments = []
-    for score, start in scored_windows:
-        end = start + SEGMENT_DURATION
-        # Check no overlap with already selected
-        overlap = False
-        for s_start, s_end in segments:
-            if not (end <= s_start or start >= s_end):
-                overlap = True
-                break
-        if not overlap:
-            actual_dur = min(SEGMENT_DURATION, total_duration - start)
-            if actual_dur >= 3:  # skip tiny segments
-                segments.append((start, end))
-            if len(segments) >= MAX_SEGMENTS:
-                break
-
-    # Sort chronologically
-    segments.sort()
-    plog(f"Found {len(segments)} best segments")
-    return [(s, min(SEGMENT_DURATION, total_duration - s)) for s, e in segments]
+def load_style_guide():
+    if not GUIDE_FOLDER:
+        return ""
+    try:
+        service = drive()
+        results = service.files().list(
+            q=f"'{GUIDE_FOLDER}' in parents and trashed=false",
+            fields="files(id,mimeType)",
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+            corpora="allDrives"
+        ).execute()
+        files = results.get("files", [])
+        if not files:
+            return ""
+        f = files[0]
+        if "google-apps.document" in f.get("mimeType", ""):
+            req = service.files().export_media(fileId=f["id"], mimeType="text/plain")
+        else:
+            req = service.files().get_media(fileId=f["id"])
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, req)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        fh.seek(0)
+        return fh.read().decode("utf-8", errors="ignore")[:3000]
+    except Exception as e:
+        plog(f"Style guide error: {e}")
+        return ""
 
 
 # =============================================================================
-# FCPXML GENERATOR
+# AUDIO WAVEFORM — find clean cut points (silence/pauses)
 # =============================================================================
 
-def seconds_to_rational(seconds, fps=30):
-    """Convert seconds to FCP rational time format."""
-    frames = round(seconds * fps)
-    return f"{frames}/30s" if fps == 30 else f"{round(seconds * 30)}/30s"
+def find_clean_cut(video_path, target_time, search_window=2.0):
+    """Find the nearest silence/pause within search_window seconds of target_time."""
+    try:
+        audio_tmp = INPUT / "audio_analysis.wav"
+        run_cmd([
+            "ffmpeg", "-y", "-i", str(video_path),
+            "-ss", str(max(0, target_time - search_window)),
+            "-t", str(search_window * 2),
+            "-vn", "-ar", "16000", "-ac", "1",
+            str(audio_tmp)
+        ])
+        r = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_frames", "-select_streams", "a", str(audio_tmp)],
+            capture_output=True, text=True
+        )
+        # Use ffmpeg silencedetect to find pauses
+        silence = subprocess.run(
+            ["ffmpeg", "-i", str(audio_tmp),
+             "-af", "silencedetect=noise=-40dB:d=0.1",
+             "-f", "null", "-"],
+            capture_output=True, text=True
+        )
+        output = silence.stderr
+        pauses = []
+        for line in output.split("\n"):
+            if "silence_start" in line:
+                try:
+                    t = float(line.split("silence_start:")[1].strip().split()[0])
+                    # Convert back to original video time
+                    original_t = max(0, target_time - search_window) + t
+                    pauses.append(original_t)
+                except Exception:
+                    pass
+        if pauses:
+            # Find the pause closest to target_time
+            best = min(pauses, key=lambda t: abs(t - target_time))
+            plog(f"Clean cut found at {best:.2f}s (target was {target_time:.2f}s)")
+            return best
+    except Exception as e:
+        plog(f"Clean cut detection failed: {e}")
+    return target_time
 
 
-def generate_fcpxml(video_file, segments, duration, width, height, orig_filename):
-    fps = 30
-    uid = str(uuid.uuid4()).upper()
-    asset_id = f"r1"
-    format_id = f"r2"
-    seq_id = f"r3"
+# =============================================================================
+# AI — pick best quote + music
+# =============================================================================
 
-    # Timeline duration = sum of all segments
-    total_timeline = sum(d for _, d in segments)
+def analyze_with_ai(transcript, music_files, style_guide=""):
+    if not OPENAI_API_KEY:
+        raise ValueError("OPENAI_API_KEY not set")
 
-    lines = []
-    lines.append('<?xml version="1.0" encoding="UTF-8"?>')
-    lines.append('<!DOCTYPE fcpxml>')
-    lines.append('<fcpxml version="1.10">')
-    lines.append('  <resources>')
-    lines.append(f'    <format id="{format_id}" name="FFVideoFormat{height}p{fps}" '
-                 f'frameDuration="1/{fps}s" width="{width}" height="{height}"/>')
-    lines.append(f'    <asset id="{asset_id}" name="{orig_filename}" uid="{uid}" '
-                 f'start="0s" duration="{seconds_to_rational(duration, fps)}" '
-                 f'hasVideo="1" hasAudio="1">')
-    lines.append(f'      <media-rep kind="original-media" src="file:///REPLACE_WITH_PATH/{orig_filename}"/>')
-    lines.append(f'    </asset>')
-    lines.append('  </resources>')
-    lines.append('  <library>')
-    lines.append('    <event name="AI Selections">')
-    lines.append(f'    <project name="{orig_filename} - AI Edit">')
-    lines.append(f'      <sequence format="{format_id}" duration="{seconds_to_rational(total_timeline, fps)}" '
-                 f'tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">')
-    lines.append('        <spine>')
+    music_list = "\n".join([f"- {f['name']}" for f in music_files]) or "No music available."
 
-    offset = 0.0
-    for i, (start, seg_dur) in enumerate(segments):
-        clip_offset = seconds_to_rational(offset, fps)
-        clip_start = seconds_to_rational(start, fps)
-        clip_dur = seconds_to_rational(seg_dur, fps)
-        lines.append(f'          <asset-clip name="Segment {i+1}" ref="{asset_id}" '
-                     f'offset="{clip_offset}" start="{clip_start}" duration="{clip_dur}" '
-                     f'format="{format_id}" tcFormat="NDF">')
-        lines.append(f'          </asset-clip>')
-        offset += seg_dur
+    system = (
+        "You are a video editor. Given a transcript, find the most compelling 30-second quote or moment.\n"
+        "Return ONLY JSON with:\n"
+        "- quote: string (the exact words from the transcript to use as caption, max 80 chars)\n"
+        "- start_time: float (approximate start time in seconds based on transcript position)\n"
+        "- music_name: string (best matching music track name from the list)\n"
+        "- explanation: string (1 sentence why this moment)\n"
+        f"{('Style Guide: ' + style_guide) if style_guide else ''}"
+    )
 
-    lines.append('        </spine>')
-    lines.append('      </sequence>')
-    lines.append('    </project>')
-    lines.append('    </event>')
-    lines.append('  </library>')
-    lines.append('</fcpxml>')
+    resp = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+        json={
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": f"Transcript:\n{transcript[:6000]}\n\nMusic:\n{music_list}"}
+            ],
+            "temperature": 0.7
+        },
+        timeout=30
+    )
+    if not resp.ok:
+        raise ValueError(f"OpenAI error {resp.status_code}: {resp.text}")
 
-    return "\n".join(lines)
+    content = resp.json()["choices"][0]["message"]["content"].strip()
+    if content.startswith("```"):
+        content = content.split("```")[1]
+        if content.startswith("json"):
+            content = content[4:]
+    result = json.loads(content.strip())
+
+    music_name = result.get("music_name", "")
+    music_file = next((f for f in music_files if f["name"] == music_name), None)
+    if not music_file and music_files:
+        import random
+        music_file = random.choice(music_files)
+
+    return result, music_file
 
 
 # =============================================================================
@@ -269,35 +341,127 @@ def run_pipeline():
                 raise ValueError("No videos found in incoming folder.")
             plog(f"Found: {video['name']}")
 
+            transcript = get_transcript(video["name"])
+            if not transcript:
+                raise ValueError("No transcript found. Upload a matching .txt/.srt file to the transcriptions folder.")
+
+            plog("Loading style guide...")
+            style_guide = load_style_guide()
+
+            plog("Fetching music tracks...")
+            music_files = list_music_files()
+            plog(f"Found {len(music_files)} music track(s)")
+
+            plog("AI analyzing transcript...")
+            result, selected_music = analyze_with_ai(transcript, music_files, style_guide)
+            plog(f"Best moment: {result.get('explanation', '')}")
+            plog(f"Quote: {result.get('quote', '')}")
+            plog(f"Approx start: {result.get('start_time', 0):.1f}s")
+            if selected_music:
+                plog(f"Music: {selected_music['name']}")
+
             service = drive()
             raw = INPUT / video["name"]
             download_file(service, video, raw)
 
-            plog("Getting video info...")
-            duration, width, height = get_duration(raw)
-            plog(f"Duration: {duration:.1f}s | {width}x{height}")
+            total_duration = get_duration(raw)
+            plog(f"Video duration: {total_duration:.1f}s")
 
-            segments = find_best_segments(raw, duration)
-            plog(f"Selected {len(segments)} segments totaling {sum(d for _,d in segments):.1f}s")
+            target_start = float(result.get("start_time", 0))
+            target_start = max(0, min(target_start, total_duration - SEGMENT_DURATION))
 
-            for i, (start, dur) in enumerate(segments):
-                plog(f"  Segment {i+1}: {start:.1f}s — {start+dur:.1f}s")
+            plog(f"Finding clean cut points near {target_start:.1f}s...")
+            clean_start = find_clean_cut(raw, target_start)
+            clean_end_target = clean_start + SEGMENT_DURATION
+            clean_end = find_clean_cut(raw, min(clean_end_target, total_duration))
+            actual_dur = clean_end - clean_start
+            actual_dur = max(5, min(actual_dur, SEGMENT_DURATION))
 
-            plog("Generating FCPXML...")
-            xml_content = generate_fcpxml(
-                video, segments, duration, width, height, video["name"]
-            )
+            plog(f"Clean segment: {clean_start:.2f}s — {clean_start + actual_dur:.2f}s")
+
+            trimmed = INPUT / "trimmed.mp4"
+            run_cmd([
+                "ffmpeg", "-y",
+                "-ss", str(clean_start),
+                "-i", str(raw),
+                "-t", str(actual_dur),
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+                "-c:a", "aac", "-b:a", "128k",
+                str(trimmed)
+            ])
+
+            # Caption from the quote
+            caption = result.get("quote", "")[:MAX_CAPTION_CHARS]
+            lines = wrap_caption(caption, max_chars_per_line=32)
+            fontsize = 42
+            line_h = fontsize + 10
+            pad_x = 40
+            pad_y = 20
+            total_text_h = len(lines) * line_h
+            block_h = total_text_h + pad_y * 2
+            block_y = (1080 - block_h) // 2
+            max_chars = max(len(l) for l in lines)
+            est_w = int(max_chars * fontsize * 0.6)
+            box_w = min(est_w + pad_x * 2, 1800)
+            box_x = (1920 - box_w) // 2
+            font = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+            drawbox = f"drawbox=x={box_x}:y={block_y}:w={box_w}:h={block_h}:color=black:t=fill"
+            drawtext_filters = [drawbox]
+            for i, line in enumerate(lines):
+                safe_line = ffmpeg_escape(line)
+                y = block_y + pad_y + i * line_h
+                drawtext_filters.append(
+                    f"drawtext=text='{safe_line}':"
+                    f"fontfile={font}:"
+                    f"fontcolor=white:fontsize={fontsize}:"
+                    f"x=(w-text_w)/2:y={y}"
+                )
+
+            vf = (
+                "scale=1920:1080:force_original_aspect_ratio=decrease,"
+                "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,"
+            ) + ",".join(drawtext_filters)
 
             central = datetime.now(timezone(timedelta(hours=-5)))
-            date_str = central.strftime("%m-%d-%Y %I%M %p")
-            xml_name = f"{video['name'].rsplit('.', 1)[0]}_{date_str}.fcpxml"
-            xml_path = OUTPUT / xml_name
-            xml_path.write_text(xml_content, encoding="utf-8")
+            date_str = central.strftime("%m-%d-%Y %I:%M %p")
+            safe_caption = " ".join(caption.split()[:6])
+            orig_name = video["name"].rsplit(".", 1)[0]
+            final_path = OUTPUT / f"{safe_caption}_{orig_name}_{date_str}.mp4"
 
-            upload_xml(xml_path)
+            if selected_music:
+                music_path = MUSIC_DIR / selected_music["name"]
+                download_file(service, selected_music, music_path)
+                music_trimmed = MUSIC_DIR / "music_trim.aac"
+                run_cmd([
+                    "ffmpeg", "-y", "-i", str(music_path),
+                    "-t", str(actual_dur),
+                    "-af", f"afade=t=in:st=0:d=1,afade=t=out:st={max(0, actual_dur-2)}:d=2,volume=0.25",
+                    str(music_trimmed)
+                ])
+                run_cmd([
+                    "ffmpeg", "-y",
+                    "-i", str(trimmed),
+                    "-i", str(music_trimmed),
+                    "-filter_complex", f"[0:v]{vf}[vout];[0:a]volume=1.0[va];[va][1:a]amix=inputs=2:duration=first[aout]",
+                    "-map", "[vout]", "-map", "[aout]",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                    "-c:a", "aac", "-b:a", "192k",
+                    str(final_path)
+                ])
+            else:
+                run_cmd([
+                    "ffmpeg", "-y",
+                    "-i", str(trimmed),
+                    "-vf", vf,
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                    "-c:a", "aac", "-b:a", "192k",
+                    str(final_path)
+                ])
+
+            upload_output(final_path)
             pipeline_status["done"] = True
-            plog("Done! Open the FCPXML in Final Cut Pro.")
-            plog("Note: Update the media path in the XML to match where your original file lives.")
+            plog("Done!")
 
         except Exception as e:
             plog(f"Error: {e}")
@@ -316,7 +480,7 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>XML Editor</title>
+<title>Interview Editor</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:Arial,sans-serif;background:#000;color:#fff;min-height:100vh;display:flex;align-items:center;justify-content:center}
@@ -341,9 +505,8 @@ h1{font-size:1.4rem;font-weight:900;color:#00a6ff;margin-bottom:2px}
 </head>
 <body>
 <div class="wrap">
-  <h1>XML Editor</h1>
-  <div class="sub">FCPXML GENERATOR</div>
-
+  <h1>Interview Editor</h1>
+  <div class="sub">TRANSCRIPT-DRIVEN 1920x1080</div>
   <div id="clip-card" class="clip-card">
     <div class="clip-thumb"></div>
     <div class="clip-info">
@@ -351,21 +514,17 @@ h1{font-size:1.4rem;font-weight:900;color:#00a6ff;margin-bottom:2px}
       <div class="clip-meta"></div>
     </div>
   </div>
-
-  <button id="go-btn">GENERATE XML</button>
+  <button id="go-btn">GENERATE CLIP</button>
   <button id="refresh-btn">&#8635; Refresh Clip</button>
   <div id="log"></div>
 </div>
-
 <script>
 var busy = false;
-
 function setLog(text, cls) {
   var el = document.getElementById("log");
   el.textContent = text;
   el.className = cls || "";
 }
-
 function loadLatestClip() {
   fetch("/api/latest-clip")
     .then(function(r) { return r.json(); })
@@ -380,20 +539,18 @@ function loadLatestClip() {
         "<div class='clip-meta'>" + mb + " &bull; latest</div></div>";
     });
 }
-
 function go() {
   if (busy) return;
   busy = true;
   document.getElementById("go-btn").disabled = true;
   setLog("Starting...", "active");
-  fetch("/api/run", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({})})
+  fetch("/api/run", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"})
     .then(function(r) { return r.json(); })
     .then(function(data) {
       if (data.error) { setLog("Error: " + data.error, "error"); busy = false; document.getElementById("go-btn").disabled = false; return; }
       pollLog();
     });
 }
-
 function pollLog() {
   var timer = setInterval(function() {
     fetch("/api/status").then(function(r) { return r.json(); }).then(function(data) {
@@ -406,7 +563,6 @@ function pollLog() {
     });
   }, 1000);
 }
-
 document.getElementById("go-btn").addEventListener("click", go);
 document.getElementById("refresh-btn").addEventListener("click", loadLatestClip);
 loadLatestClip();
@@ -423,7 +579,6 @@ loadLatestClip();
 def index():
     return app.response_class(HTML.encode("utf-8"), mimetype="text/html")
 
-
 @app.route("/api/latest-clip")
 def api_latest_clip():
     try:
@@ -432,7 +587,6 @@ def api_latest_clip():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
 @app.route("/api/run", methods=["POST"])
 def api_run():
     if pipeline_status.get("running"):
@@ -440,11 +594,9 @@ def api_run():
     threading.Thread(target=run_pipeline, daemon=True).start()
     return jsonify({"ok": True})
 
-
 @app.route("/api/status")
 def api_status():
     return jsonify(pipeline_status)
-
 
 if __name__ == "__main__":
     ensure_dirs()
