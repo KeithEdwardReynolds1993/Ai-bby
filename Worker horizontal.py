@@ -239,6 +239,7 @@ def find_best_segment(video_path, total_duration):
 
 
 GUIDE_FOLDER = os.getenv("GOOGLE_DRIVE_GUIDE_FOLDER_ID", "")
+INTERVIEW_FOLDER = os.getenv("GOOGLE_DRIVE_INTERVIEW_FOLDER_ID", "")
 MUSIC_FOLDER = os.getenv("GOOGLE_DRIVE_MUSIC_FOLDER_ID", "")
 
 def load_style_guide():
