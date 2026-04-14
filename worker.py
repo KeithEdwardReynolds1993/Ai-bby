@@ -74,6 +74,22 @@ def ffmpeg_escape(text):
     )
 
 
+
+def wrap_caption(text, max_chars_per_line=20):
+    """Wrap caption text so it fits on screen."""
+    words = text.split()
+    lines = []
+    current = []
+    for word in words:
+        if sum(len(w) for w in current) + len(current) + len(word) > max_chars_per_line and current:
+            lines.append(" ".join(current))
+            current = [word]
+        else:
+            current.append(word)
+    if current:
+        lines.append(" ".join(current))
+    return r"\n".join(lines)
+
 def get_duration(path):
     r = subprocess.run(
         ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(path)],
@@ -218,6 +234,40 @@ def find_best_segment(video_path, total_duration):
     return min(best_start, total_duration - SEGMENT_DURATION)
 
 
+
+GUIDE_FOLDER = os.getenv("GOOGLE_DRIVE_GUIDE_FOLDER_ID", "")
+
+def load_style_guide():
+    if not GUIDE_FOLDER:
+        return ""
+    try:
+        service = drive()
+        results = service.files().list(
+            q=f"'{GUIDE_FOLDER}' in parents and trashed=false",
+            fields="files(id,mimeType)",
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+            corpora="allDrives"
+        ).execute()
+        files = results.get("files", [])
+        if not files:
+            return ""
+        f = files[0]
+        if "google-apps.document" in f.get("mimeType", ""):
+            req = service.files().export_media(fileId=f["id"], mimeType="text/plain")
+        else:
+            req = service.files().get_media(fileId=f["id"])
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, req)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        fh.seek(0)
+        return fh.read().decode("utf-8", errors="ignore")[:3000]
+    except Exception as e:
+        print(f"Style guide error: {e}")
+        return ""
+
 # =============================================================================
 # AI CAPTION
 # =============================================================================
@@ -234,6 +284,9 @@ def generate_caption(prompt, vision):
         f"Subjects: {', '.join(vision.get('subjects', []))}"
     )
 
+    style_guide = load_style_guide()
+    vision_summary += f"\n\nStyle Guide:\n{style_guide}" if style_guide else ""
+
     resp = requests.post(
         "https://api.openai.com/v1/chat/completions",
         headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
@@ -244,6 +297,9 @@ def generate_caption(prompt, vision):
                     "role": "system",
                     "content": (
                         f"You write short punchy video captions. Max {MAX_CAPTION_CHARS} chars. "
+                        "Captions will be word-wrapped at ~20 characters per line and displayed "
+                        "centered on a vertical video. Write captions that read naturally across "
+                        "2-3 short lines — avoid long unbroken phrases. Think punchy, bold, short words. "
                         "Return ONLY JSON with key: caption"
                     )
                 },
@@ -319,14 +375,15 @@ def run_pipeline(prompt):
             ])
 
             final_path = OUTPUT / "final.mp4"
-            safe_caption = ffmpeg_escape(caption)
+            wrapped = wrap_caption(caption, max_chars_per_line=20)
+            safe_caption = ffmpeg_escape(wrapped)
             vf = (
                 f"scale=1080:1920:force_original_aspect_ratio=decrease,"
                 f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,"
                 f"drawtext=text='{safe_caption}':"
                 f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
-                f"fontcolor=white:fontsize=54:x=(w-text_w)/2:y=(h-text_h)/2:"
-                f"box=1:boxcolor=black@0.72:boxborderw=40"
+                f"fontcolor=white:fontsize=52:x=(w-text_w)/2:y=(h-text_h)/2:"
+                f"box=1:boxcolor=black@0.72:boxborderw=36:line_spacing=8"
             )
             run_cmd([
                 "ffmpeg", "-y",
