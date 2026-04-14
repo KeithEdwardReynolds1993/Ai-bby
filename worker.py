@@ -875,10 +875,12 @@ function renderGenerations(gens) {
     var card=document.createElement("div"); card.className="gen-card"; card.dataset.id=g.id;
     var thumbHtml;
     if (g.drive_thumb_url) {
-      thumbHtml = "<img class='gen-thumb' src='" + g.drive_thumb_url + "' onerror=\"this.outerHTML='<div class=\'gen-thumb-placeholder\'>🎬</div>'\">";
-    } else {
-      thumbHtml = "<div class='gen-thumb-placeholder'>🎬</div>";
-    }
+      var thumbHtml;
+if (g.drive_thumb_url) {
+  thumbHtml = `<img class="gen-thumb" src="${g.drive_thumb_url}" onerror="this.outerHTML='<div class=&quot;gen-thumb-placeholder&quot;>🎬</div>'">`;
+} else {
+  thumbHtml = `<div class="gen-thumb-placeholder">🎬</div>`;
+}
     var date=new Date(g.created_at+"Z").toLocaleString();
     var metaParts=[];
     if(g.vibe)metaParts.push("Vibe: "+g.vibe);
