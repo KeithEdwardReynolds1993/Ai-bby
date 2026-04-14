@@ -413,20 +413,16 @@ def run_pipeline():
                 "scale=1080:1920:force_original_aspect_ratio=decrease,"
                 "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
             )
-            drawtext_filters = []
-            for i, line in enumerate(lines):
-                safe_line = ffmpeg_escape(line)
-                # y position: center the whole block, offset per line
-                y_offset = f"(h-{total_height})/2+{i * line_height}"
-                drawtext_filters.append(
-                    f"drawtext=text='{safe_line}':"
-                    f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:"
-                    f"fontcolor=white:fontsize={fontsize}:"
-                    f"x=(w-text_w)/2:"
-                    f"y={y_offset}:"
-                    f"box=1:boxcolor=black:boxborderw={pad}"
-                )
-            vf = base + "," + ",".join(drawtext_filters)
+            # Join lines with FFmpeg newline, single drawtext = no overlap
+            joined = r"\n".join(ffmpeg_escape(l) for l in lines)
+            drawtext = (
+                f"drawtext=text='{joined}':"
+                f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:"
+                f"fontcolor=white:fontsize={fontsize}:"
+                f"x=(w-text_w)/2:y=(h-text_h)/2:"
+                f"box=1:boxcolor=black:boxborderw={pad}:line_spacing=8"
+            )
+            vf = base + "," + drawtext
 
             plog("Picking music track...")
             music = get_random_music()
