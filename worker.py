@@ -302,7 +302,7 @@ def generate_caption(vision):
                         f"You write short punchy video captions. Max {MAX_CAPTION_CHARS} chars. "
                         "Captions will be word-wrapped at ~20 characters per line and displayed "
                         "centered on a vertical video. Write captions that read naturally across "
-                        "2-3 short lines. Each line max 3-4 words. Never write one long sentence. Break after every thought. "
+                        "STRICT: Max 5 words. No sentences. No punctuation. Examples: 'Make it count' or 'Stay focused' or 'Built different'. "
                         "Return ONLY JSON with key: caption"
                     )
                 },
@@ -375,6 +375,8 @@ def run_pipeline():
 
             plog("Generating caption...")
             caption = generate_caption(vision)
+            # Hard truncate to 5 words max
+            caption = " ".join(caption.replace(".", "").replace(",", "").split()[:5])
             plog(f"Caption: {caption}")
 
             plog("Downloading video...")
@@ -401,7 +403,7 @@ def run_pipeline():
             ])
 
             final_path = OUTPUT / "final.mp4"
-            lines = wrap_caption(caption, max_chars_per_line=18)
+            lines = wrap_caption(caption, max_chars_per_line=14)
             fontsize = 52
             line_height = fontsize + 16
             pad = 24
