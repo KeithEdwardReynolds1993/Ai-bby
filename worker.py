@@ -19,6 +19,7 @@ app = Flask("worker")
 TMP = Path("/tmp/ai_bby")
 INPUT = TMP / "input"
 OUTPUT = TMP / "output"
+MUSIC_DIR = TMP / "music"
 
 SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
 INCOMING_FOLDER = os.getenv("GOOGLE_DRIVE_INCOMING_FOLDER_ID")
@@ -47,10 +48,11 @@ def drive():
 def ensure_dirs():
     INPUT.mkdir(parents=True, exist_ok=True)
     OUTPUT.mkdir(parents=True, exist_ok=True)
+    MUSIC_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def clean_run_artifacts():
-    for f in list(INPUT.glob("*")) + list(OUTPUT.glob("*")):
+    for f in list(INPUT.glob("*")) + list(OUTPUT.glob("*")) + list(MUSIC_DIR.glob("*")):
         if f.is_file():
             f.unlink()
 
@@ -236,6 +238,7 @@ def find_best_segment(video_path, total_duration):
 
 
 GUIDE_FOLDER = os.getenv("GOOGLE_DRIVE_GUIDE_FOLDER_ID", "")
+MUSIC_FOLDER = os.getenv("GOOGLE_DRIVE_MUSIC_FOLDER_ID", "")
 
 def load_style_guide():
     if not GUIDE_FOLDER:
@@ -322,6 +325,29 @@ def generate_caption(vision):
             content = content[4:]
     return json.loads(content.strip())["caption"]
 
+
+
+def get_random_music():
+    if not MUSIC_FOLDER:
+        return None
+    try:
+        service = drive()
+        results = service.files().list(
+            q=f"'{MUSIC_FOLDER}' in parents and trashed=false",
+            fields="files(id,name,mimeType)",
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+            corpora="allDrives"
+        ).execute()
+        files = [f for f in results.get("files", [])
+                 if f.get("mimeType", "").startswith(("audio/", "video/mp4"))]
+        if not files:
+            return None
+        import random
+        return random.choice(files)
+    except Exception as e:
+        plog(f"Music fetch failed: {e}")
+        return None
 
 # =============================================================================
 # PIPELINE
