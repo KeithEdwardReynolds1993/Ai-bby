@@ -1,13 +1,10 @@
 import os
-import io
 import json
 import subprocess
 import threading
 import traceback
 from pathlib import Path
 
-import numpy as np
-import librosa
 import requests
 from flask import Flask, request, jsonify
 from googleapiclient.discovery import build
@@ -38,7 +35,14 @@ pipeline_lock = threading.Lock()
 
 def log(msg):
     print(msg)
-    pipeline_status["log"].append(msg)
+    pipeline_status["log"].append(str(msg))
+
+
+def safe_float(val, default=1.0):
+    try:
+        return float(str(val).replace("x", "").strip())
+    except Exception:
+        return default
 
 
 def drive():
@@ -59,13 +63,56 @@ def clean_run_artifacts():
     for p in [MERGED, MERGED_CAPPED]:
         if p.exists():
             p.unlink()
-    for f in OUTPUT.glob("*.mp4"):
-        f.unlink()
+    for f in INPUT.glob("*"):
+        if f.is_file():
+            f.unlink()
+    for f in OUTPUT.glob("*"):
+        if f.is_file():
+            f.unlink()
+    for f in MUSIC_DIR.glob("*"):
+        if f.is_file():
+            f.unlink()
 
 
 def run(cmd):
     log(">>> " + " ".join(str(c) for c in cmd))
     subprocess.run(cmd, check=True)
+
+
+def ffmpeg_escape(text):
+    return (
+        text.replace("\\", r"\\\\")
+            .replace("'", r"'\''")
+            .replace(":", r"\:")
+            .replace("%", r"\%")
+            .replace(",", r"\,")
+            .replace("[", r"\[")
+            .replace("]", r"\]")
+            .replace("\n", " ")
+            .replace("\r", "")
+    )
+
+
+def get_video_duration(path):
+    result = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(path)],
+        capture_output=True,
+        text=True,
+        check=True
+    )
+    info = json.loads(result.stdout)
+    return float(info["format"]["duration"])
+
+
+def get_vibe_filters(vibe):
+    return {
+        "normal": "",
+        "hype": ",eq=contrast=1.25:brightness=0.04:saturation=1.35",
+        "cinematic": ",eq=contrast=1.08:brightness=-0.04:saturation=0.8",
+        "dreamy": ",gblur=sigma=1.2,eq=brightness=0.06:saturation=0.85",
+        "gritty": ",eq=contrast=1.35:brightness=-0.08:saturation=0.65",
+        "retro": ",eq=saturation=0.8"
+    }.get(vibe, "")
 
 
 def list_incoming_files():
@@ -135,76 +182,12 @@ def archive_clips(selected_files):
             log(f"Archive failed for {f['name']}: {e}")
 
 
-def ffmpeg_escape(text):
-    return (
-        text.replace("\\", r"\\\\")
-            .replace("'", r"'\''")
-            .replace(":", r"\:")
-            .replace("%", r"\%")
-            .replace(",", r"\,")
-            .replace("[", r"\[")
-            .replace("]", r"\]")
-            .replace("\n", " ")
-            .replace("\r", "")
-    )
-
-
-def get_video_duration(path):
-    result = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(path)],
-        capture_output=True,
-        text=True
-    )
-    info = json.loads(result.stdout)
-    return float(info["format"]["duration"])
-
-
-def get_vibe_filters(vibe):
-    return {
-        "normal": "",
-        "hype": ",eq=contrast=1.3:brightness=0.05:saturation=1.5",
-        "cinematic": ",eq=contrast=1.1:brightness=-0.05:saturation=0.7,vignette",
-        "dreamy": ",gblur=sigma=1.5,eq=brightness=0.08:saturation=0.8",
-        "gritty": ",eq=contrast=1.4:brightness=-0.1:saturation=0.6,noise=alls=20:allf=t",
-        "retro": ",curves=vintage,eq=saturation=0.8,vignette",
-    }.get(vibe, "")
-
-
-def analyze_music(music_path):
-    log(f"Analyzing music: {music_path.name}")
-    y, sr = librosa.load(str(music_path), sr=22050, mono=True)
-    tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
-    tempo = float(np.asarray(tempo).flat[0])
-    beat_times = librosa.frames_to_time(beat_frames, sr=sr).tolist()
-    downbeat_times = beat_times[::4]
-    duration = float(len(y) / sr)
-    return {
-        "bpm": tempo,
-        "beat_times": beat_times,
-        "downbeat_times": downbeat_times,
-        "duration": duration,
-    }
-
-
-def get_cut_times(music_analysis, cut_style, total_video_duration):
-    downbeats = music_analysis["downbeat_times"]
-    beats = music_analysis["beat_times"]
-    if cut_style == "every_beat":
-        times = beats
-    elif cut_style == "every_2_downbeats":
-        times = downbeats[::2]
-    elif cut_style in ("every_4_downbeats", "phrase"):
-        times = downbeats[::4]
-    else:
-        times = downbeats
-    return [t for t in times if 0 < t < total_video_duration]
-
-
 def ask_openai(prompt, clip_names, music_files=None):
     if not OPENAI_API_KEY:
         raise ValueError("OPENAI_API_KEY is not set")
 
     music_list = "\n".join([f["name"] for f in (music_files or [])]) or "No music available"
+
     resp = requests.post(
         "https://api.openai.com/v1/chat/completions",
         headers={
@@ -217,20 +200,21 @@ def ask_openai(prompt, clip_names, music_files=None):
                 {
                     "role": "system",
                     "content": (
-                        "You are a professional AI video director. Return ONLY JSON with keys: "
-                        "caption, speed, vibe, music_file, cut_style, transition, "
+                        "Return ONLY JSON with keys: "
+                        "caption, speed, vibe, music_file, cut_style, "
                         "caption_fade_in, caption_fade_out, ken_burns, explanation."
                     )
                 },
                 {
                     "role": "user",
-                    "content": f"Clips: {', '.join(clip_names)}\n\nMusic:\n{music_list}\n\nPrompt: {prompt}"
+                    "content": f"Clips: {', '.join(clip_names)}\nMusic:\n{music_list}\nPrompt: {prompt}"
                 }
             ],
             "temperature": 0.7
         },
         timeout=30
     )
+
     if not resp.ok:
         raise ValueError(f"OpenAI error {resp.status_code}: {resp.text}")
 
@@ -244,7 +228,7 @@ def ask_openai(prompt, clip_names, music_files=None):
 
 def build_video(selected_files, caption, speed=1.0, vibe="normal",
                 music_file_obj=None, cut_style="every_downbeat",
-                transition="cut", caption_fade_in=0.5, caption_fade_out=1.0,
+                caption_fade_in=0.5, caption_fade_out=1.0,
                 ken_burns=False):
     ensure_dirs()
     clean_run_artifacts()
@@ -259,6 +243,7 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
         raw = INPUT / f"raw{i+1:02d}.mp4"
         target = INPUT / f"clip{i+1:02d}.mp4"
         download_file(service, f, raw)
+
         run([
             "ffmpeg", "-y", "-i", str(raw),
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
@@ -266,13 +251,6 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
             str(target)
         ])
         local_clips.append(target)
-
-    music_path = None
-    music_analysis = None
-    if music_file_obj:
-        music_path = MUSIC_DIR / music_file_obj["name"]
-        download_file(service, music_file_obj, music_path)
-        music_analysis = analyze_music(music_path)
 
     capped = []
     for i, clip in enumerate(local_clips):
@@ -290,24 +268,6 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
             sped.append(out)
         local_clips = sped
 
-    durations = [get_video_duration(c) for c in local_clips]
-    total_duration = sum(durations)
-
-    if music_analysis and cut_style != "cut":
-        cut_times = get_cut_times(music_analysis, cut_style, total_duration)
-        cut_times = [t for t in cut_times if t < MAX_OUTPUT_DURATION]
-        boundaries = [0.0] + cut_times + [min(total_duration, MAX_OUTPUT_DURATION)]
-        segment_durations = [boundaries[i + 1] - boundaries[i] for i in range(len(boundaries) - 1)]
-        trimmed = []
-        clip_sequence = (local_clips * ((len(segment_durations) // len(local_clips)) + 1))[:len(segment_durations)]
-
-        for i, (clip, seg_dur) in enumerate(zip(clip_sequence, segment_durations)):
-            out = INPUT / f"trim{i+1:02d}.mp4"
-            run(["ffmpeg", "-y", "-i", str(clip), "-t", str(seg_dur), "-c", "copy", str(out)])
-            trimmed.append(out)
-
-        local_clips = trimmed
-
     list_file = TMP / "list.txt"
     list_file.write_text("\n".join([f"file '{c}'" for c in local_clips]), encoding="utf-8")
     run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", str(MERGED)])
@@ -321,6 +281,11 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
 
     merged_duration = min(raw_merged_duration, MAX_OUTPUT_DURATION)
     final_path = OUTPUT / "final.mp4"
+
+    music_path = None
+    if music_file_obj:
+        music_path = MUSIC_DIR / music_file_obj["name"]
+        download_file(service, music_file_obj, music_path)
 
     safe_caption = ffmpeg_escape(caption)
     vibe_filter = get_vibe_filters(vibe)
@@ -379,7 +344,7 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
 
 def run_pipeline(selected_files, caption, speed=1.0, vibe="normal",
                  music_file_obj=None, cut_style="every_downbeat",
-                 transition="cut", caption_fade_in=0.5, caption_fade_out=1.0,
+                 caption_fade_in=0.5, caption_fade_out=1.0,
                  ken_burns=False):
     global pipeline_status
 
@@ -387,17 +352,28 @@ def run_pipeline(selected_files, caption, speed=1.0, vibe="normal",
         pipeline_status = {"running": True, "log": [], "done": False, "error": None}
         try:
             log("Starting pipeline...")
+            log(f"Caption: {caption} | Speed: {speed}x | Vibe: {vibe}")
+
             final_path = build_video(
-                selected_files, caption, speed, vibe,
-                music_file_obj, cut_style, transition,
-                caption_fade_in, caption_fade_out, ken_burns
+                selected_files,
+                caption,
+                speed,
+                vibe,
+                music_file_obj,
+                cut_style,
+                caption_fade_in,
+                caption_fade_out,
+                ken_burns
             )
+
             uploaded = upload_output(final_path)
             archive_clips(selected_files)
+
             pipeline_status["done"] = True
             pipeline_status["drive_file_id"] = uploaded.get("id")
             pipeline_status["drive_file_name"] = uploaded.get("name")
             log("Done!")
+
         except Exception as e:
             log(f"Error: {e}")
             log(traceback.format_exc())
@@ -406,7 +382,8 @@ def run_pipeline(selected_files, caption, speed=1.0, vibe="normal",
             pipeline_status["running"] = False
 
 
-HTML = """<!DOCTYPE html>
+HTML = """
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -468,7 +445,6 @@ let aiSettings = {
   speed: 1.0,
   vibe: "normal",
   cut_style: "every_downbeat",
-  transition: "cut",
   caption_fade_in: 0.5,
   caption_fade_out: 1.0,
   ken_burns: false
@@ -534,17 +510,16 @@ function askAI() {
       return;
     }
     aiSettings = {
-      caption: data.caption,
-      speed: data.speed,
-      vibe: data.vibe,
+      caption: data.caption || "",
+      speed: parseFloat(String(data.speed || "1").replace("x", "")) || 1.0,
+      vibe: data.vibe || "normal",
       cut_style: data.cut_style || "every_downbeat",
-      transition: data.transition || "cut",
       caption_fade_in: data.caption_fade_in || 0.5,
       caption_fade_out: data.caption_fade_out || 1.0,
-      ken_burns: data.ken_burns || false
+      ken_burns: !!data.ken_burns
     };
     document.getElementById("caption").value = data.caption || "";
-    document.getElementById("log").textContent = JSON.stringify(data, null, 2);
+    document.getElementById("log").textContent = JSON.stringify(aiSettings, null, 2);
   }).catch(err => {
     document.getElementById("log").textContent = "AI request failed: " + err;
   });
@@ -563,10 +538,9 @@ function runPipeline() {
       files,
       caption,
       music_file: music,
-      speed: aiSettings.speed,
+      speed: parseFloat(String(aiSettings.speed || "1").replace("x", "")) || 1.0,
       vibe: aiSettings.vibe,
       cut_style: aiSettings.cut_style,
-      transition: aiSettings.transition,
       caption_fade_in: aiSettings.caption_fade_in,
       caption_fade_out: aiSettings.caption_fade_out,
       ken_burns: aiSettings.ken_burns
@@ -598,7 +572,8 @@ loadClips();
 loadMusic();
 </script>
 </body>
-</html>"""
+</html>
+"""
 
 
 @app.route("/")
@@ -653,13 +628,12 @@ def api_run():
             args=(
                 selected_files,
                 caption,
-                float(data.get("speed") or 1.0),
+                safe_float(data.get("speed"), 1.0),
                 data.get("vibe") or "normal",
                 data.get("music_file"),
                 data.get("cut_style") or "every_downbeat",
-                data.get("transition") or "cut",
-                float(data.get("caption_fade_in") or 0.5),
-                float(data.get("caption_fade_out") or 1.0),
+                safe_float(data.get("caption_fade_in"), 0.5),
+                safe_float(data.get("caption_fade_out"), 1.0),
                 bool(data.get("ken_burns") or False),
             ),
             daemon=True
