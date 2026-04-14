@@ -41,6 +41,7 @@ INSTAGRAM_ACCOUNT_ID = os.getenv("INSTAGRAM_ACCOUNT_ID", "")
 MAX_OUTPUT_DURATION = 30
 
 pipeline_status = {"running": False, "log": [], "done": False, "error": None}
+pipeline_lock = threading.Lock()
 
 
 # ─── Database ─────────────────────────────────────────────────────────────────
@@ -63,22 +64,27 @@ def init_db():
             drive_thumb_url TEXT,
             status TEXT DEFAULT 'awaiting_approval',
             posted_at TEXT,
-            post_error TEXT
+            post_error TEXT,
+            file_hash TEXT
         )
     """)
+    try:
+        conn.execute("ALTER TABLE generations ADD COLUMN file_hash TEXT")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
 def db_insert_generation(caption, vibe, music, cut_style, transition, speed,
-                          drive_file_id, drive_file_name):
+                          drive_file_id, drive_file_name, file_hash):
     conn = sqlite3.connect(str(DB_PATH))
     cur = conn.execute("""
         INSERT INTO generations
         (created_at, caption, vibe, music, cut_style, transition, speed,
-         drive_file_id, drive_file_name, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_approval')
+         drive_file_id, drive_file_name, file_hash, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_approval')
     """, (datetime.utcnow().isoformat(), caption, vibe, music, cut_style,
-          transition, speed, drive_file_id, drive_file_name))
+          transition, speed, drive_file_id, drive_file_name, file_hash))
     conn.commit()
     row_id = cur.lastrowid
     conn.close()
@@ -113,6 +119,24 @@ def db_get_generation(gen_id):
     row = conn.execute("SELECT * FROM generations WHERE id=?", (gen_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
+
+def db_find_by_hash(file_hash):
+    conn = sqlite3.connect(str(DB_PATH))
+    row = conn.execute(
+        "SELECT id FROM generations WHERE file_hash=? ORDER BY id DESC LIMIT 1",
+        (file_hash,)
+    ).fetchone()
+    conn.close()
+    return row
+
+
+# ─── Deduplication ────────────────────────────────────────────────────────────
+
+def hash_files(files):
+    ids = sorted([str(f["id"]) for f in files if f.get("id")])
+    if not ids:
+        raise ValueError("No valid file IDs found for hashing")
+    return hashlib.sha256(",".join(ids).encode()).hexdigest()
 
 
 # ─── Drive ────────────────────────────────────────────────────────────────────
@@ -580,39 +604,50 @@ def run_pipeline(selected_files, caption, speed=1.0, vibe="normal",
                  transition="cut", caption_fade_in=0.5, caption_fade_out=1.0,
                  ken_burns=False):
     global pipeline_status
-    pipeline_status = {"running": True, "log": [], "done": False, "error": None}
-    try:
-        log("Starting pipeline...")
-        log(f"Caption: {caption} | Speed: {speed}x | Vibe: {vibe} | Cut: {cut_style} | Transition: {transition}")
-        if music_file_obj:
-            log(f"Music: {music_file_obj['name']}")
-        final_path = build_video(
-            selected_files, caption, speed, vibe,
-            music_file_obj, cut_style, transition,
-            caption_fade_in, caption_fade_out, ken_burns
-        )
-        uploaded = upload_output(final_path)
-        drive_file_id = uploaded.get("id")
-        drive_file_name = uploaded.get("name")
-        music_name = music_file_obj["name"] if music_file_obj else ""
-        gen_id = db_insert_generation(
-            caption, vibe, music_name, cut_style, transition, speed,
-            drive_file_id, drive_file_name
-        )
-        time.sleep(3)
-        thumb = get_drive_thumb(drive_file_id)
-        if thumb:
-            db_update_thumb(gen_id, thumb)
-        archive_clips(selected_files)
-        log(f"Done! Generation #{gen_id} awaiting approval.")
-        pipeline_status["done"] = True
-        pipeline_status["gen_id"] = gen_id
-    except Exception as e:
-        log(f"Error: {e}")
-        log(traceback.format_exc())
-        pipeline_status["error"] = str(e)
-    finally:
-        pipeline_status["running"] = False
+
+    with pipeline_lock:
+        pipeline_status = {"running": True, "log": [], "done": False, "error": None}
+        try:
+            log("Starting pipeline...")
+
+            file_hash = hash_files(selected_files)
+            existing = db_find_by_hash(file_hash)
+            if existing:
+                log(f"Already processed this clip set (Gen #{existing[0]}). Skipping.")
+                pipeline_status["done"] = True
+                return
+
+            log(f"Caption: {caption} | Speed: {speed}x | Vibe: {vibe} | Cut: {cut_style} | Transition: {transition}")
+            if music_file_obj:
+                log(f"Music: {music_file_obj['name']}")
+
+            final_path = build_video(
+                selected_files, caption, speed, vibe,
+                music_file_obj, cut_style, transition,
+                caption_fade_in, caption_fade_out, ken_burns
+            )
+            uploaded = upload_output(final_path)
+            drive_file_id = uploaded.get("id")
+            drive_file_name = uploaded.get("name")
+            music_name = music_file_obj["name"] if music_file_obj else ""
+            gen_id = db_insert_generation(
+                caption, vibe, music_name, cut_style, transition, speed,
+                drive_file_id, drive_file_name, file_hash
+            )
+            time.sleep(3)
+            thumb = get_drive_thumb(drive_file_id)
+            if thumb:
+                db_update_thumb(gen_id, thumb)
+            archive_clips(selected_files)
+            log(f"Done! Generation #{gen_id} awaiting approval.")
+            pipeline_status["done"] = True
+            pipeline_status["gen_id"] = gen_id
+        except Exception as e:
+            log(f"Error: {e}")
+            log(traceback.format_exc())
+            pipeline_status["error"] = str(e)
+        finally:
+            pipeline_status["running"] = False
 
 
 # ─── HTML ─────────────────────────────────────────────────────────────────────
@@ -1017,11 +1052,23 @@ def api_run():
     global pipeline_status
     if pipeline_status.get("running"):
         return jsonify({"error": "Already running"}), 409
-    data = request.json
+
+    data = request.json or {}
     selected_files = data.get("files", [])
     caption = data.get("caption", "").strip()
+
     if not selected_files or not caption:
         return jsonify({"error": "Missing files or caption"}), 400
+
+    try:
+        file_hash = hash_files(selected_files)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+    existing = db_find_by_hash(file_hash)
+    if existing:
+        return jsonify({"ok": True, "skipped": True, "existing_gen_id": existing[0]})
+
     thread = threading.Thread(
         target=run_pipeline,
         args=(
