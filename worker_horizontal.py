@@ -147,11 +147,11 @@ def upload_xml(xml_path):
     service = drive()
     uploaded = service.files().create(
         body={"name": xml_path.name, "parents": [OUTPUT_FOLDER]},
-        media_body=MediaFileUpload(str(xml_path), mimetype="application/xml"),
+        media_body=MediaFileUpload(str(xml_path), mimetype="text/plain"),
         fields="id,name",
         supportsAllDrives=True
     ).execute()
-    plog(f"Uploaded XML: {uploaded.get('name')} ({uploaded.get('id')})")
+    plog(f"Uploaded EDL: {uploaded.get('name')} ({uploaded.get('id')})")
     return uploaded
 
 
@@ -287,46 +287,37 @@ def pick_moments_from_transcript(transcript, prompt=""):
 # FCPXML GENERATOR
 # =============================================================================
 
-def seconds_to_rational(seconds, fps=30):
-    frames = round(seconds * fps)
-    return f"{frames}/30s"
+def seconds_to_timecode(seconds, fps=30):
+    """Convert seconds to SMPTE timecode HH:MM:SS:FF"""
+    total_frames = round(seconds * fps)
+    ff = total_frames % fps
+    ss = (total_frames // fps) % 60
+    mm = (total_frames // fps // 60) % 60
+    hh = total_frames // fps // 3600
+    return f"{hh:02d}:{mm:02d}:{ss:02d}:{ff:02d}"
 
 
-def generate_fcpxml(segments, duration, width, height, orig_filename):
-    fps = 30
-    uid = str(uuid.uuid4()).upper()
-    total_timeline = sum(e - s for s, e, _ in segments)
-
+def generate_edl(segments, orig_filename, fps=30):
+    """Generate CMX3600 EDL for Premiere Pro."""
     lines = []
-    lines.append('<?xml version="1.0" encoding="UTF-8"?>')
-    lines.append('<!DOCTYPE fcpxml>')
-    lines.append('<fcpxml version="1.10">')
-    lines.append('  <resources>')
-    lines.append(f'    <format id="r2" name="FFVideoFormat{height}p{fps}" frameDuration="1/{fps}s" width="{width}" height="{height}"/>')
-    lines.append(f'    <asset id="r1" name="{orig_filename}" uid="{uid}" start="0s" duration="{seconds_to_rational(duration, fps)}" hasVideo="1" hasAudio="1">')
-    lines.append(f'      <media-rep kind="original-media" src="file:///REPLACE_WITH_PATH/{orig_filename}"/>')
-    lines.append(f'    </asset>')
-    lines.append('  </resources>')
-    lines.append('  <library>')
-    lines.append('    <event name="AI Selections">')
-    lines.append(f'    <project name="{orig_filename} - AI Edit">')
-    lines.append(f'      <sequence format="r2" duration="{seconds_to_rational(total_timeline, fps)}" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">')
-    lines.append('        <spine>')
+    lines.append("TITLE: AI Edit")
+    lines.append("FCM: NON-DROP FRAME")
+    lines.append("")
 
-    offset = 0.0
+    record_start = 0.0
     for i, (start, end, quote) in enumerate(segments):
         seg_dur = end - start
-        lines.append(f'          <!-- {quote[:80]} -->')
-        lines.append(f'          <asset-clip name="Moment {i+1}" ref="r1" offset="{seconds_to_rational(offset, fps)}" start="{seconds_to_rational(start, fps)}" duration="{seconds_to_rational(seg_dur, fps)}" format="r2" tcFormat="NDF">')
-        lines.append(f'          </asset-clip>')
-        offset += seg_dur
+        record_end = record_start + seg_dur
+        clip_name = orig_filename[:32]  # EDL has 32 char limit
 
-    lines.append('        </spine>')
-    lines.append('      </sequence>')
-    lines.append('    </project>')
-    lines.append('    </event>')
-    lines.append('  </library>')
-    lines.append('</fcpxml>')
+        lines.append(f"{i+1:03d}  AX       AA/V  C        {seconds_to_timecode(start, fps)} {seconds_to_timecode(end, fps)} {seconds_to_timecode(record_start, fps)} {seconds_to_timecode(record_end, fps)}")
+        lines.append(f"* FROM CLIP NAME: {clip_name}")
+        if quote:
+            lines.append(f"* COMMENT: {quote[:70]}")
+        lines.append("")
+
+        record_start = record_end
+
     return "\n".join(lines)
 
 
@@ -394,12 +385,12 @@ def run_pipeline(prompt=""):
                 duration = max(e for _, e, _ in segments) + 1.0
             width, height = 1920, 1080
 
-            plog("Generating FCPXML...")
-            xml_content = generate_fcpxml(segments, duration, width, height, video["name"])
+            plog("Generating EDL...")
+            xml_content = generate_edl(segments, video["name"])
 
             central = datetime.now(timezone(timedelta(hours=-5)))
             date_str = central.strftime("%m-%d-%Y %I%M %p")
-            xml_name = f"{video['name'].rsplit('.', 1)[0]}_{date_str}.fcpxml"
+            xml_name = f"{video['name'].rsplit('.', 1)[0]}_{date_str}.edl"
             xml_path = OUTPUT / xml_name
             xml_path.write_text(xml_content, encoding="utf-8")
 
@@ -450,7 +441,7 @@ h1{font-size:1.4rem;font-weight:900;color:#00a6ff;margin-bottom:2px}
 <body>
 <div class="wrap">
   <h1>XML Editor</h1>
-  <div class="sub">TRANSCRIPT + AUDIO DRIVEN FCPXML</div>
+  <div class="sub">TRANSCRIPT-DRIVEN EDL FOR PREMIERE PRO</div>
   <div id="clip-card" class="clip-card">
     <div class="clip-thumb"></div>
     <div class="clip-info">
