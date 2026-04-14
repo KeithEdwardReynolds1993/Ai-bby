@@ -4,6 +4,7 @@ import json
 import subprocess
 import threading
 import traceback
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -402,7 +403,12 @@ def run_pipeline():
                 "-an", str(trimmed)
             ])
 
-            final_path = OUTPUT / "final.mp4"
+            from datetime import timezone, timedelta
+            central = datetime.now(timezone(timedelta(hours=-5)))
+            date_str = central.strftime("%m-%d-%Y %I:%M %p")
+            safe_caption = " ".join(caption.split()[:8]).rstrip(".")
+            orig_name = video["name"].rsplit(".", 1)[0]
+            final_path = OUTPUT / f"{safe_caption}_{orig_name}_{date_str}.mp4"
             lines = wrap_caption(caption, max_chars_per_line=14)
             fontsize = 52
             line_height = fontsize + 16
