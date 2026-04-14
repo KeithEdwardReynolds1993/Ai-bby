@@ -406,29 +406,47 @@ def run_pipeline():
             from datetime import timezone, timedelta
             central = datetime.now(timezone(timedelta(hours=-5)))
             date_str = central.strftime("%m-%d-%Y %I:%M %p")
-            safe_caption = " ".join(caption.split()[:8]).rstrip(".")
+            file_caption = " ".join(caption.split()[:8]).rstrip(".")
             orig_name = video["name"].rsplit(".", 1)[0]
-            final_path = OUTPUT / f"{safe_caption}_{orig_name}_{date_str}.mp4"
-            lines = wrap_caption(caption, max_chars_per_line=14)
-            fontsize = 52
-            line_height = fontsize + 16
-            pad = 24
-            total_height = len(lines) * line_height
-            # Center block vertically, each line centered horizontally
+            final_path = OUTPUT / f"{file_caption}_{orig_name}_{date_str}.mp4"
+            # Wrap to max 12 chars per line for clean stacking
+            lines = wrap_caption(caption, max_chars_per_line=12)
+            fontsize = 64
+            line_spacing = 12
+            pad_x = 48  # horizontal padding
+            pad_y = 24  # vertical padding
+            font = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
             base = (
                 "scale=1080:1920:force_original_aspect_ratio=decrease,"
                 "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
             )
-            # Join lines with FFmpeg newline, single drawtext = no overlap
-            joined = r"\n".join(ffmpeg_escape(l) for l in lines)
-            drawtext = (
-                f"drawtext=text='{joined}':"
-                f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:"
-                f"fontcolor=white:fontsize={fontsize}:"
-                f"x=(w-text_w)/2:y=(h-text_h)/2:"
-                f"box=1:boxcolor=black:boxborderw={pad}:line_spacing=8"
-            )
-            vf = base + "," + drawtext
+
+            # Each line as separate drawtext, manually compute y position
+            # Estimate line height in pixels
+            line_height_px = fontsize + line_spacing
+            total_block_h = len(lines) * line_height_px
+            # Estimate max line width in pixels (approx 0.6 * fontsize per char)
+            max_line_chars = max(len(l) for l in lines)
+            est_text_w = int(max_line_chars * fontsize * 0.58)
+            box_w = est_text_w + pad_x * 2
+            box_x = (1080 - box_w) // 2
+            block_y = (1920 - total_block_h) // 2
+
+            drawtext_filters = []
+            for i, line in enumerate(lines):
+                safe_line = ffmpeg_escape(line)
+                y = block_y + i * line_height_px
+                drawtext_filters.append(
+                    f"drawtext=text='{safe_line}':"
+                    f"fontfile={font}:"
+                    f"fontcolor=white:fontsize={fontsize}:"
+                    f"x=(w-text_w)/2:"
+                    f"y={y}:"
+                    f"box=1:boxcolor=black:boxborderw={pad_y}"
+                )
+
+            vf = base + "," + ",".join(drawtext_filters)
 
             plog("Picking music track...")
             music = get_random_music()
@@ -447,8 +465,8 @@ def run_pipeline():
                     "ffmpeg", "-y",
                     "-i", str(trimmed),
                     "-i", str(music_trimmed),
-                    "-filter_complex", f"[0:v]{vf}[vout];[1:a]anull[aout]",
-                    "-map", "[vout]", "-map", "[aout]",
+                    "-vf", vf,
+                    "-map", "0:v", "-map", "1:a",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                     "-c:a", "aac", "-b:a", "192k",
                     str(final_path)
