@@ -97,7 +97,7 @@ def get_transcript(video_name):
         return None
     base = video_name.rsplit(".", 1)[0]
     service = drive()
-    for ext in [".txt", ".srt", ".vtt"]:
+    for ext in [".json", ".txt", ".srt", ".vtt"]:
         results = service.files().list(
             q=f"name='{base}{ext}' and '{TRANSCRIPTIONS_FOLDER}' in parents and trashed=false",
             fields="files(id,name)",
@@ -190,6 +190,44 @@ def find_clean_cut(audio_path, target_time, search_window=2.0, total_duration=No
 # =============================================================================
 # AI — pick best moments from transcript
 # =============================================================================
+
+
+def parse_transcript(raw, filename=""):
+    """Parse transcript - handles JSON word-level format, SRT, or plain text."""
+    if filename.endswith(".json") or (raw.strip().startswith("{")):
+        try:
+            data = json.loads(raw)
+            # Word-level JSON format
+            words = []
+            for segment in data.get("segments", []):
+                for word in segment.get("words", []):
+                    if word.get("type") == "word" and word.get("text", "").strip():
+                        words.append({
+                            "text": word["text"],
+                            "start": word["start"],
+                            "end": word["start"] + word["duration"]
+                        })
+            # Build readable transcript with timestamps every ~30 words
+            lines = []
+            chunk = []
+            chunk_start = None
+            for w in words:
+                if chunk_start is None:
+                    chunk_start = w["start"]
+                chunk.append(w["text"])
+                if len(chunk) >= 30:
+                    t = int(chunk_start)
+                    lines.append(f"[{t//60:02d}:{t%60:02d}] {' '.join(chunk)}")
+                    chunk = []
+                    chunk_start = None
+            if chunk:
+                t = int(chunk_start or 0)
+                lines.append(f"[{t//60:02d}:{t%60:02d}] {' '.join(chunk)}")
+            return "\n".join(lines), words
+        except Exception as e:
+            print(f"JSON parse failed: {e}")
+    # Plain text or SRT - no word timestamps
+    return raw, []
 
 def pick_moments_from_transcript(transcript, prompt=""):
     if not OPENAI_API_KEY:
@@ -308,8 +346,12 @@ def run_pipeline(prompt=""):
                 raise ValueError("No transcript found. Upload a matching .txt/.srt file to the transcriptions folder.")
             plog(f"Transcript loaded ({len(transcript)} chars)")
 
+            plog("Parsing transcript...")
+            parsed_text, word_timestamps = parse_transcript(transcript, video["name"])
+            plog(f"Parsed: {len(word_timestamps)} words with timestamps" if word_timestamps else "Plain text transcript")
+
             plog("AI picking best moments from transcript...")
-            moments = pick_moments_from_transcript(transcript, prompt)
+            moments = pick_moments_from_transcript(parsed_text, prompt)
             plog(f"AI selected {len(moments)} moments")
             for i, m in enumerate(moments):
                 plog(f"  {i+1}. {m['start_time']:.1f}s-{m['end_time']:.1f}s — {m.get('quote', '')[:50]}")
@@ -318,11 +360,23 @@ def run_pipeline(prompt=""):
             service = drive()
             audio_path = download_audio_only(service, video)
 
-            plog("Finding clean cut points using audio silence detection...")
+            plog("Refining cut points using audio silence detection...")
             segments = []
             for m in moments:
-                clean_start = find_clean_cut(audio_path, float(m["start_time"]))
-                clean_end = find_clean_cut(audio_path, float(m["end_time"]))
+                raw_start = float(m["start_time"])
+                raw_end = float(m["end_time"])
+
+                # If we have word timestamps, snap to nearest word boundary first
+                if word_timestamps:
+                    starts = [w["start"] for w in word_timestamps if abs(w["start"] - raw_start) < 3.0]
+                    ends = [w["end"] for w in word_timestamps if abs(w["end"] - raw_end) < 3.0]
+                    if starts:
+                        raw_start = min(starts, key=lambda t: abs(t - raw_start))
+                    if ends:
+                        raw_end = min(ends, key=lambda t: abs(t - raw_end))
+
+                clean_start = find_clean_cut(audio_path, raw_start)
+                clean_end = find_clean_cut(audio_path, raw_end)
                 if clean_end > clean_start:
                     segments.append((clean_start, clean_end, m.get("quote", "")))
 
