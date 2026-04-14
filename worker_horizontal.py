@@ -35,6 +35,7 @@ SEGMENT_DURATION = 30
 
 pipeline_status = {"running": False, "log": [], "done": False, "error": None}
 pipeline_lock = threading.Lock()
+stop_event = threading.Event()
 
 
 def plog(msg):
@@ -336,12 +337,14 @@ def run_pipeline(prompt=""):
             ensure_dirs()
             clean_run_artifacts()
 
+            stop_event.clear()
             plog("Getting latest video from Drive...")
             video = get_latest_video()
             if not video:
                 raise ValueError("No videos found in incoming folder.")
             plog(f"Found: {video['name']}")
 
+            if stop_event.is_set(): raise InterruptedError("Stopped.")
             transcript = get_transcript(video["name"])
             if not transcript:
                 raise ValueError("No transcript found. Upload a matching .txt/.srt file to the transcriptions folder.")
@@ -353,6 +356,7 @@ def run_pipeline(prompt=""):
             music_files = list_music_files()
             plog(f"Found {len(music_files)} music track(s)")
 
+            if stop_event.is_set(): raise InterruptedError("Stopped.")
             plog("AI analyzing transcript...")
             result, selected_music = analyze_with_ai(transcript, music_files, style_guide, prompt)
             plog(f"Best moment: {result.get('explanation', '')}")
@@ -361,6 +365,7 @@ def run_pipeline(prompt=""):
             if selected_music:
                 plog(f"Music: {selected_music['name']}")
 
+            if stop_event.is_set(): raise InterruptedError("Stopped.")
             service = drive()
             raw = INPUT / video["name"]
             download_file(service, video, raw)
@@ -517,6 +522,7 @@ h1{font-size:1.4rem;font-weight:900;color:#00a6ff;margin-bottom:2px}
     <input id="prompt" style="width:100%;background:#0d0d0d;border:1px solid #1c1c1c;border-radius:10px;padding:13px 48px 13px 14px;font-size:.9rem;color:#fff;outline:none" placeholder="Director note e.g. focus on ROI moments...">
     <button id="go-btn" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);width:32px;height:32px;background:#00a6ff;color:#000;border:none;border-radius:7px;font-weight:900;cursor:pointer;font-size:.9rem">&#9654;</button>
   </div>
+  <button id="stop-btn" style="width:100%;background:none;border:1px solid #ff4d6d;border-radius:8px;color:#ff4d6d;font-size:.65rem;font-family:monospace;padding:8px;cursor:pointer;margin-bottom:8px;display:none">&#9632; Stop</button>
   <button id="refresh-btn">&#8635; Refresh Clip</button>
   <div id="log"></div>
 </div>
@@ -597,6 +603,14 @@ def api_run():
     data = request.json or {}
     prompt = data.get("prompt", "").strip()
     threading.Thread(target=run_pipeline, args=(prompt,), daemon=True).start()
+    return jsonify({"ok": True})
+
+@app.route("/api/stop", methods=["POST"])
+def api_stop():
+    global pipeline_status
+    stop_event.set()
+    clean_run_artifacts()
+    pipeline_status = {"running": False, "log": ["Stopped."], "done": False, "error": "Stopped by user"}
     return jsonify({"ok": True})
 
 @app.route("/api/status")
