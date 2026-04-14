@@ -18,7 +18,7 @@ from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 from google.oauth2 import service_account
 import requests
 
-app = Flask(__name__)
+app = Flask('worker')
 
 TMP = Path("/tmp/ai_bby")
 INPUT = TMP / "input"
