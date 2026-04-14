@@ -169,7 +169,7 @@ XFADE_TRANSITIONS = {
 def analyze_music(music_path):
     """Return dict with bpm, downbeat timestamps, energy profile."""
     log(f"Analyzing music: {music_path.name}")
-    y, sr = librosa.load(str(music_path), sr=None, mono=True)
+    y, sr = librosa.load(str(music_path), sr=22050, mono=True)
 
     # BPM + beat frames
     tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
@@ -328,7 +328,7 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
             audio_filter = f"atempo={speed}" if speed <= 2.0 else f"atempo=2.0,atempo={speed/2.0:.4f}"
             run(["ffmpeg", "-y", "-i", str(clip),
                  "-vf", f"setpts={pts}*PTS",
-                 "-af", audio_filter,
+                 "-an",
                  str(out)])
             sped_clips.append(out)
         local_clips = sped_clips
@@ -369,42 +369,14 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
 
     # Ken Burns applied in final vf filter (fast scale/crop, not per-clip zoompan)
 
-    # ── Concat with xfade transitions ──
+    # ── Concat clips (simple, low memory) ──
+    list_file = TMP / "list.txt"
+    list_file.write_text("\n".join([f"file '{c}'" for c in local_clips]), encoding="utf-8")
+    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", str(MERGED)])
+    merged_input = MERGED
+
+    # Apply xfade-style fade as a post-process on the merged video if requested
     xfade_name = XFADE_TRANSITIONS.get(transition)
-
-    if xfade_name and len(local_clips) > 1:
-        # Build complex filter for xfade between all clips
-        xfade_dur = 0.3
-        filter_parts = []
-        inputs = []
-        for i, clip in enumerate(local_clips):
-            inputs += ["-i", str(clip)]
-
-        # Chain xfades
-        prev = "[0:v]"
-        for i in range(1, len(local_clips)):
-            clip_dur = durations[i-1] if i-1 < len(durations) else 2.0
-            offset = max(0.1, clip_dur - xfade_dur)
-            out_label = f"[xf{i}]" if i < len(local_clips) - 1 else "[vout]"
-            filter_parts.append(
-                f"{prev}[{i}:v]xfade=transition={xfade_name}:duration={xfade_dur}:offset={offset}{out_label}"
-            )
-            prev = f"[xf{i}]"
-
-        filter_complex = ";".join(filter_parts)
-        merged_xfade = TMP / "merged_xfade.mp4"
-        run(["ffmpeg", "-y"] + inputs +
-            ["-filter_complex", filter_complex,
-             "-map", "[vout]",
-             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-             str(merged_xfade)])
-        merged_input = merged_xfade
-    else:
-        # Simple concat
-        list_file = TMP / "list.txt"
-        list_file.write_text("\n".join([f"file '{c}'" for c in local_clips]), encoding="utf-8")
-        run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", str(MERGED)])
-        merged_input = MERGED
 
     # ── Final render: scale + vibe + caption ──
     cap_hash = hashlib.sha256((caption + vibe + str(speed) + transition).encode()).hexdigest()[:8]
