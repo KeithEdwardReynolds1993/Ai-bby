@@ -272,7 +272,7 @@ def load_style_guide():
 # AI CAPTION
 # =============================================================================
 
-def generate_caption(prompt, vision):
+def generate_caption(vision):
     if not OPENAI_API_KEY:
         raise ValueError("OPENAI_API_KEY not set")
 
@@ -305,7 +305,7 @@ def generate_caption(prompt, vision):
                 },
                 {
                     "role": "user",
-                    "content": f"Video analysis:\n{vision_summary}\n\nPrompt: {prompt}"
+                    "content": f"Video analysis:\n{vision_summary}\n\nWrite the best caption for this clip."
                 }
             ],
             "temperature": 0.8
@@ -327,7 +327,7 @@ def generate_caption(prompt, vision):
 # PIPELINE
 # =============================================================================
 
-def run_pipeline(prompt):
+def run_pipeline():
     global pipeline_status
     with pipeline_lock:
         pipeline_status = {"running": True, "log": [], "done": False, "error": None}
@@ -348,7 +348,7 @@ def run_pipeline(prompt):
                 plog(f"Mood: {vision.get('mood', '')} | Energy: {vision.get('energy', '')}")
 
             plog("Generating caption...")
-            caption = generate_caption(prompt, vision)
+            caption = generate_caption(vision)
             plog(f"Caption: {caption}")
 
             plog("Downloading video...")
@@ -426,10 +426,10 @@ h1{font-size:1.4rem;font-weight:900;color:#00a6ff;margin-bottom:2px}
 .clip-info{flex:1;overflow:hidden}
 .clip-name{font-size:.8rem;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#fff}
 .clip-meta{font-size:.65rem;color:#333;font-family:monospace;margin-top:3px}
-.prompt-row{position:relative;margin-bottom:10px}
-#prompt{width:100%;background:#0d0d0d;border:1px solid #1c1c1c;border-radius:10px;padding:13px 48px 13px 14px;font-size:.9rem;color:#fff;outline:none;transition:border-color .15s}
-#prompt:focus{border-color:#00a6ff}
-#go-btn{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:#00a6ff;color:#000;border:none;border-radius:7px;width:32px;height:32px;font-size:.95rem;font-weight:900;cursor:pointer;transition:opacity .15s}
+
+
+
+#go-btn{width:100%;background:#00a6ff;color:#000;border:none;border-radius:10px;padding:14px;font-size:1rem;font-weight:900;cursor:pointer;transition:opacity .15s;margin-bottom:10px;letter-spacing:.05em}
 #go-btn:hover{opacity:.8}
 #go-btn:disabled{opacity:.2;cursor:not-allowed}
 #refresh-btn{width:100%;background:none;border:1px solid #1a1a1a;border-radius:8px;color:#222;font-size:.65rem;font-family:monospace;padding:8px;cursor:pointer;transition:border-color .15s,color .15s;margin-bottom:24px}
@@ -453,10 +453,7 @@ h1{font-size:1.4rem;font-weight:900;color:#00a6ff;margin-bottom:2px}
     </div>
   </div>
 
-  <div class="prompt-row">
-    <input id="prompt" placeholder="Describe the vibe e.g. hype moment, funny clip..." autofocus>
-    <button id="go-btn">&#9654;</button>
-  </div>
+  <button id="go-btn">GO</button>
   <button id="refresh-btn">&#8635; Refresh Clip</button>
   <div id="log"></div>
 </div>
@@ -498,8 +495,7 @@ function loadLatestClip() {
 }
 
 function go() {
-  var prompt = document.getElementById("prompt").value.trim();
-  if (!prompt || busy) return;
+  if (busy) return;
   busy = true;
   document.getElementById("go-btn").disabled = true;
   setLog("Starting...", "active");
@@ -507,7 +503,7 @@ function go() {
   fetch("/api/run", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({prompt: prompt})
+    body: JSON.stringify({})
   }).then(function(r) { return r.json(); }).then(function(data) {
     if (data.error) {
       setLog("Error: " + data.error, "error");
@@ -539,7 +535,7 @@ function pollLog() {
 
 document.getElementById("go-btn").addEventListener("click", go);
 document.getElementById("refresh-btn").addEventListener("click", loadLatestClip);
-document.getElementById("prompt").addEventListener("keydown", function(e) { if (e.key === "Enter") go(); });
+
 
 loadLatestClip();
 </script>
@@ -569,11 +565,7 @@ def api_latest_clip():
 def api_run():
     if pipeline_status.get("running"):
         return jsonify({"error": "Already running"}), 409
-    data = request.json or {}
-    prompt = data.get("prompt", "").strip()
-    if not prompt:
-        return jsonify({"error": "No prompt"}), 400
-    threading.Thread(target=run_pipeline, args=(prompt,), daemon=True).start()
+    threading.Thread(target=run_pipeline, daemon=True).start()
     return jsonify({"ok": True})
 
 
