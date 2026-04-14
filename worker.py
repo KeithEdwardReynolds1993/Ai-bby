@@ -383,10 +383,15 @@ def run_pipeline():
                 plog(f"Mood: {vision.get('mood', '')} | Energy: {vision.get('energy', '')}")
 
             plog("Generating caption...")
-            caption = generate_caption(vision)
-            # Hard truncate to 5 words max
+            plog("Fetching music tracks...")
+            music_files = list_music_files()
+            plog(f"Found {len(music_files)} music track(s)")
+            plog("Generating caption and selecting music...")
+            caption, selected_music = generate_caption_and_music(vision, music_files)
             caption = " ".join(caption.split()[:8])
             plog(f"Caption: {caption}")
+            if selected_music:
+                plog(f"Selected music: {selected_music['name']}")
 
             plog("Downloading video...")
             service = drive()
