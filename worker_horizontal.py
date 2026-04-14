@@ -244,7 +244,7 @@ def pick_moments_from_transcript(transcript, prompt=""):
         "Order by importance, most compelling first."
     )
 
-    user = f"Transcript:\n{transcript[:8000]}"
+    user = f"Transcript:\n{transcript[:4000]}"
     if prompt:
         user += f"\n\nDirector note: {prompt}"
 
@@ -265,10 +265,21 @@ def pick_moments_from_transcript(transcript, prompt=""):
         raise ValueError(f"OpenAI error {resp.status_code}: {resp.text}")
 
     content = resp.json()["choices"][0]["message"]["content"].strip()
-    if content.startswith("```"):
-        content = content.split("```")[1]
-        if content.startswith("json"):
-            content = content[4:]
+    # Strip markdown fences
+    if "```" in content:
+        parts = content.split("```")
+        for part in parts:
+            part = part.strip()
+            if part.startswith("json"):
+                part = part[4:].strip()
+            if part.startswith("["):
+                content = part
+                break
+    # Find JSON array
+    start = content.find("[")
+    end = content.rfind("]") + 1
+    if start >= 0 and end > start:
+        content = content[start:end]
     return json.loads(content.strip())
 
 
