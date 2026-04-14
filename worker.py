@@ -23,6 +23,7 @@ INPUT = TMP / "input"
 OUTPUT = TMP / "output"
 MUSIC_DIR = TMP / "music"
 MERGED = TMP / "merged.mp4"
+MERGED_CAPPED = TMP / "merged_capped.mp4"
 
 SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
 INCOMING_FOLDER = os.getenv("GOOGLE_DRIVE_INCOMING_FOLDER_ID")
@@ -31,6 +32,7 @@ ARCHIVE_FOLDER = os.getenv("GOOGLE_DRIVE_ARCHIVE_FOLDER_ID")
 MUSIC_FOLDER = os.getenv("GOOGLE_DRIVE_MUSIC_FOLDER_ID")
 MAX_CAPTION_CHARS = int(os.getenv("MAX_CAPTION_CHARS") or "60")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+MAX_OUTPUT_DURATION = 30
 
 pipeline_status = {"running": False, "log": [], "done": False, "error": None}
 
@@ -52,6 +54,8 @@ def ensure_dirs():
 def clean_run_artifacts():
     if MERGED.exists():
         MERGED.unlink()
+    if MERGED_CAPPED.exists():
+        MERGED_CAPPED.unlink()
     for f in OUTPUT.glob("*.mp4"):
         f.unlink()
 
@@ -167,24 +171,18 @@ XFADE_TRANSITIONS = {
 # ─── Beat analysis ────────────────────────────────────────────────────────────
 
 def analyze_music(music_path):
-    """Return dict with bpm, downbeat timestamps, energy profile."""
     log(f"Analyzing music: {music_path.name}")
     y, sr = librosa.load(str(music_path), sr=22050, mono=True)
 
-    # BPM + beat frames
     tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
     tempo = float(np.asarray(tempo).flat[0])
     beat_times = librosa.frames_to_time(beat_frames, sr=sr)
-
-    # Downbeats (every 4 beats)
     downbeat_times = beat_times[::4].tolist()
 
-    # Energy (RMS per frame)
     rms = librosa.feature.rms(y=y)[0]
     energy_mean = float(np.mean(rms))
     energy_max = float(np.max(rms))
 
-    # Spectral centroid (brightness)
     centroid = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
     brightness = float(np.mean(centroid))
 
@@ -203,10 +201,6 @@ def analyze_music(music_path):
     }
 
 def get_cut_times(music_analysis, cut_style, num_clips, total_video_duration):
-    """
-    Return list of timestamps (seconds) at which to cut to next clip.
-    cut_style: 'every_downbeat' | 'every_2_downbeats' | 'every_4_downbeats' | 'every_beat' | 'phrase'
-    """
     downbeats = music_analysis["downbeat_times"]
     beats = music_analysis["beat_times"]
 
@@ -221,7 +215,6 @@ def get_cut_times(music_analysis, cut_style, num_clips, total_video_duration):
     else:
         times = downbeats
 
-    # Filter to within video duration, skip first beat (start at 0)
     times = [t for t in times if 0 < t < total_video_duration]
     return times
 
@@ -326,15 +319,15 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
         download_file(service, music_file_obj, music_path)
         music_analysis = analyze_music(music_path)
 
-    # ── Cap clips at 45 seconds ──
+    # ── Cap each clip at 30s ──
     capped_clips = []
     for i, clip in enumerate(local_clips):
         dur = get_video_duration(clip)
-        if dur > 30:
+        if dur > MAX_OUTPUT_DURATION:
             out = INPUT / f"capped{i+1:02d}.mp4"
-            run(["ffmpeg", "-y", "-i", str(clip), "-t", "30", "-c", "copy", str(out)])
+            run(["ffmpeg", "-y", "-i", str(clip), "-t", str(MAX_OUTPUT_DURATION), "-c", "copy", str(out)])
             capped_clips.append(out)
-            log(f"Capped clip{i+1} from {dur:.1f}s to 30s")
+            log(f"Capped clip{i+1} from {dur:.1f}s to {MAX_OUTPUT_DURATION}s")
         else:
             capped_clips.append(clip)
     local_clips = capped_clips
@@ -356,15 +349,13 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
     # ── Get durations ──
     durations = [get_video_duration(c) for c in local_clips]
     total_duration = sum(durations)
-    log(f"Total video duration: {total_duration:.1f}s")
+    log(f"Total video duration before cap: {total_duration:.1f}s")
 
     # ── Beat-synced cutting ──
     if music_analysis and cut_style != "cut":
         cut_times = get_cut_times(music_analysis, cut_style, len(local_clips), total_duration)
         log(f"Beat cut points: {[f'{t:.2f}s' for t in cut_times]}")
 
-        # Trim/loop each clip to fit between cut points
-        # Build segment boundaries
         boundaries = [0.0] + cut_times + [total_duration]
         segment_durations = [boundaries[i+1] - boundaries[i] for i in range(len(boundaries)-1)]
 
@@ -375,7 +366,6 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
         )):
             out = INPUT / f"trim{i+1:02d}.mp4"
             clip_dur = get_video_duration(clip)
-            # If clip is shorter than segment, loop it; if longer, trim it
             if clip_dur < seg_dur:
                 loop_count = int(seg_dur / clip_dur) + 1
                 run(["ffmpeg", "-y", "-stream_loop", str(loop_count), "-i", str(clip),
@@ -387,16 +377,26 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
         local_clips = trimmed_clips
         durations = segment_durations
 
-    # Ken Burns applied in final vf filter (fast scale/crop, not per-clip zoompan)
-
-    # ── Concat clips (simple, low memory) ──
+    # ── Concat clips ──
     list_file = TMP / "list.txt"
     list_file.write_text("\n".join([f"file '{c}'" for c in local_clips]), encoding="utf-8")
     run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", str(MERGED)])
-    merged_input = MERGED
 
-    # Apply xfade-style fade as a post-process on the merged video if requested
-    xfade_name = XFADE_TRANSITIONS.get(transition)
+    # ── Hard cap merged file to MAX_OUTPUT_DURATION ──
+    raw_merged_duration = get_video_duration(MERGED)
+    log(f"Merged duration: {raw_merged_duration:.1f}s | Cap: {MAX_OUTPUT_DURATION}s")
+
+    if raw_merged_duration > MAX_OUTPUT_DURATION:
+        log(f"Trimming merged file to {MAX_OUTPUT_DURATION}s...")
+        run(["ffmpeg", "-y", "-i", str(MERGED),
+             "-t", str(MAX_OUTPUT_DURATION),
+             "-c", "copy", str(MERGED_CAPPED)])
+        merged_input = MERGED_CAPPED
+    else:
+        merged_input = MERGED
+
+    merged_duration = min(raw_merged_duration, MAX_OUTPUT_DURATION)
+    log(f"Final output duration: {merged_duration:.1f}s")
 
     # ── Final render: scale + vibe + caption ──
     cap_hash = hashlib.sha256((caption + vibe + str(speed) + transition).encode()).hexdigest()[:8]
@@ -404,11 +404,7 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
     safe_caption = ffmpeg_escape(caption)
     pad = 40
     vibe_filter = get_vibe_filters(vibe)
-    MAX_OUTPUT_DURATION = 30
-    merged_duration = min(get_video_duration(merged_input), MAX_OUTPUT_DURATION)
-    log(f"Output duration capped at: {merged_duration:.1f}s")
 
-    # Animated caption: fade in then fade out
     fade_in_end = caption_fade_in + 0.5
     fade_out_start = max(fade_in_end + 0.5, merged_duration - caption_fade_out - 0.5)
     alpha_expr = (
@@ -444,13 +440,13 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
     # ── Mix music ──
     if music_path and music_path.exists():
         log(f"Mixing music: {music_path.name}")
-        # Trim or loop music to video duration
         music_trimmed = TMP / "music_trimmed.wav"
         music_dur = music_analysis["duration"] if music_analysis else 999
         if music_dur < merged_duration:
             loop_count = int(merged_duration / music_dur) + 1
             run(["ffmpeg", "-y", "-stream_loop", str(loop_count), "-i", str(music_path),
-                 "-t", str(merged_duration), "-af", "afade=t=out:st=" + str(merged_duration - 2) + ":d=2",
+                 "-t", str(merged_duration),
+                 "-af", f"afade=t=out:st={merged_duration - 2}:d=2",
                  str(music_trimmed)])
         else:
             run(["ffmpeg", "-y", "-i", str(music_path),
@@ -458,7 +454,6 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
                  "-af", f"afade=t=out:st={merged_duration - 2}:d=2",
                  str(music_trimmed)])
 
-        # Render video + mixed audio
         run(["ffmpeg", "-y",
              "-i", str(merged_input),
              "-i", str(music_trimmed),
@@ -471,9 +466,19 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
              "-c:a", "aac", "-b:a", "192k",
              str(final_path)])
     else:
-        run(["ffmpeg", "-y", "-i", str(merged_input), "-t", str(merged_duration), "-vf", vf,
-             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-an",
+        run(["ffmpeg", "-y",
+             "-i", str(merged_input),
+             "-t", str(merged_duration),
+             "-vf", vf,
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+             "-an",
              str(final_path)])
+
+    # ── Verify final duration ──
+    actual_duration = get_video_duration(final_path)
+    log(f"Final file duration verified: {actual_duration:.1f}s")
+    if actual_duration > MAX_OUTPUT_DURATION + 1:
+        raise RuntimeError(f"Output duration {actual_duration:.1f}s exceeds cap of {MAX_OUTPUT_DURATION}s — something went wrong.")
 
     return final_path
 
@@ -703,7 +708,6 @@ function renderMusic() {
   var list = document.getElementById("music-list");
   list.innerHTML = "";
 
-  // No music option
   var noMusic = document.createElement("button");
   noMusic.className = "no-music-btn" + (selectedMusicId === null ? " selected" : "");
   noMusic.textContent = "No music (video only)";
@@ -791,7 +795,6 @@ function askAI() {
       document.getElementById("caption").value = data.caption;
       updateRunBtn();
 
-      // Auto-select AI's music pick
       if (data.music_file) {
         var match = allMusic.find(function(f) { return f.name === data.music_file; });
         if (match) { selectedMusicId = match.id; renderMusic(); }
