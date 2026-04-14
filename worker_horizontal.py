@@ -23,7 +23,8 @@ OUTPUT = TMP / "output"
 MUSIC_DIR = TMP / "music"
 
 SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
-INCOMING_FOLDER = os.getenv("GOOGLE_DRIVE_INCOMING_FOLDER_ID")
+INTERVIEW_FOLDER = os.getenv("GOOGLE_DRIVE_INTERVIEW_FOLDER_ID", "")
+BROLL_FOLDER = os.getenv("GOOGLE_DRIVE_BROLL_FOLDER_ID", "")
 TRANSCRIPTIONS_FOLDER = os.getenv("GOOGLE_DRIVE_TRANSCRIPTIONS_FOLDER_ID", "")
 OUTPUT_FOLDER = os.getenv("GOOGLE_DRIVE_OUTPUT_FOLDER_ID")
 MUSIC_FOLDER = os.getenv("GOOGLE_DRIVE_MUSIC_FOLDER_ID", "")
@@ -109,7 +110,7 @@ def wrap_caption(text, max_chars_per_line=32):
 def get_latest_video():
     service = drive()
     results = service.files().list(
-        q=f"'{INCOMING_FOLDER}' in parents and trashed=false",
+        q=f"'{INTERVIEW_FOLDER}' in parents and trashed=false",
         fields="files(id,name,mimeType,size,thumbnailLink,modifiedTime)",
         orderBy="modifiedTime desc",
         includeItemsFromAllDrives=True,
