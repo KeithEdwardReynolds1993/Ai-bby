@@ -404,7 +404,9 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
     safe_caption = ffmpeg_escape(caption)
     pad = 40
     vibe_filter = get_vibe_filters(vibe)
-    merged_duration = get_video_duration(merged_input)
+    MAX_OUTPUT_DURATION = 30
+    merged_duration = min(get_video_duration(merged_input), MAX_OUTPUT_DURATION)
+    log(f"Output duration capped at: {merged_duration:.1f}s")
 
     # Animated caption: fade in then fade out
     fade_in_end = caption_fade_in + 0.5
@@ -460,6 +462,7 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
         run(["ffmpeg", "-y",
              "-i", str(merged_input),
              "-i", str(music_trimmed),
+             "-t", str(merged_duration),
              "-filter_complex",
              f"[0:v]{vf}[vout];"
              f"[1:a]volume=0.85,afade=t=in:st=0:d=1[aout]",
@@ -468,7 +471,7 @@ def build_video(selected_files, caption, speed=1.0, vibe="normal",
              "-c:a", "aac", "-b:a", "192k",
              str(final_path)])
     else:
-        run(["ffmpeg", "-y", "-i", str(merged_input), "-vf", vf,
+        run(["ffmpeg", "-y", "-i", str(merged_input), "-t", str(merged_duration), "-vf", vf,
              "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-an",
              str(final_path)])
 
