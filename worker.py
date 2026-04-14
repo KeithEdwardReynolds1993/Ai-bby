@@ -401,11 +401,12 @@ def run_pipeline():
             ])
 
             final_path = OUTPUT / "final.mp4"
-            lines = wrap_caption(caption, max_chars_per_line=22)
+            lines = wrap_caption(caption, max_chars_per_line=18)
             fontsize = 52
-            line_height = fontsize + 12
+            line_height = fontsize + 16
+            pad = 24
             total_height = len(lines) * line_height
-            # Stack drawtext filters for each line
+            # Center block vertically, each line centered horizontally
             base = (
                 "scale=1080:1920:force_original_aspect_ratio=decrease,"
                 "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
@@ -413,21 +414,50 @@ def run_pipeline():
             drawtext_filters = []
             for i, line in enumerate(lines):
                 safe_line = ffmpeg_escape(line)
+                # y position: center the whole block, offset per line
                 y_offset = f"(h-{total_height})/2+{i * line_height}"
                 drawtext_filters.append(
                     f"drawtext=text='{safe_line}':"
                     f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:"
-                    f"fontcolor=white:fontsize={fontsize}:x=(w-text_w)/2:y={y_offset}:"
-                    f"box=1:boxcolor=black@0.72:boxborderw=20"
+                    f"fontcolor=white:fontsize={fontsize}:"
+                    f"x=(w-text_w)/2:"
+                    f"y={y_offset}:"
+                    f"box=1:boxcolor=black:boxborderw={pad}"
                 )
             vf = base + "," + ",".join(drawtext_filters)
-            run_cmd([
-                "ffmpeg", "-y",
-                "-i", str(trimmed),
-                "-vf", vf,
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                "-an", str(final_path)
-            ])
+
+            plog("Picking music track...")
+            music = get_random_music()
+            if music:
+                plog(f"Music: {music['name']}")
+                music_path = MUSIC_DIR / music["name"]
+                download_file(service, music, music_path)
+                music_trimmed = MUSIC_DIR / "music_trim.aac"
+                run_cmd([
+                    "ffmpeg", "-y", "-i", str(music_path),
+                    "-t", str(actual_seg),
+                    "-af", f"afade=t=in:st=0:d=1,afade=t=out:st={max(0, actual_seg-2)}:d=2,volume=0.8",
+                    str(music_trimmed)
+                ])
+                run_cmd([
+                    "ffmpeg", "-y",
+                    "-i", str(trimmed),
+                    "-i", str(music_trimmed),
+                    "-filter_complex", f"[0:v]{vf}[vout];[1:a]anull[aout]",
+                    "-map", "[vout]", "-map", "[aout]",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                    "-c:a", "aac", "-b:a", "192k",
+                    str(final_path)
+                ])
+            else:
+                plog("No music found, rendering without.")
+                run_cmd([
+                    "ffmpeg", "-y",
+                    "-i", str(trimmed),
+                    "-vf", vf,
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                    "-an", str(final_path)
+                ])
 
             upload_output(final_path)
             pipeline_status["done"] = True
